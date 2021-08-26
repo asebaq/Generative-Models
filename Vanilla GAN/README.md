@@ -1,1 +1,1 @@
-Implemented Vanilla GAN architecture with conditional GAN option
+Implemented Vanilla GAN & CGAN(conditional GAN)
