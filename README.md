@@ -1,2 +1,2 @@
 # Generative-Models
-Repository of Various Code Implementation of Generative Models
+Repository of Various Test & Implementation of Generative Models
