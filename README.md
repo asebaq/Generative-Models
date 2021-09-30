@@ -6,5 +6,8 @@ Repository of Various Test & Implementation of Generative Models
 * CycleGAN
 * SAGAN(Self-Attention GAN)
 
+## VAE
+* Vanilla VAE
+
 ## Diffusion Models
 * work in progess
