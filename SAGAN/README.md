@@ -1,5 +1,7 @@
 Implemented and tested SAGAN(Self-Attention GAN) with Pytorch & einops
 
+WGAN-GP loss was used
+
 Tested with STL10 test dataset
 
 Was set up to store some examples of generated images
