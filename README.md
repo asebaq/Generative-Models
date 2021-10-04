@@ -10,4 +10,4 @@ Repository of Various Test & Implementation of Generative Models
 * Vanilla VAE
 
 ## Diffusion Models
-* work in progess
+* SR3(Diffusion model applied to Super Resolution Task) : https://arxiv.org/pdf/2104.07636.pdf
