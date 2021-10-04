@@ -7,6 +7,6 @@ Tested with yosemite dataset from https://people.eecs.berkeley.edu/~taesung_park
 #### Examples of train images pair
 
 
-#### Examples result from trained CycleGAN model
+#### Result from trained CycleGAN model
 
 
