@@ -2,6 +2,8 @@ Implemented SR3(Image Super-Resolution via Iterative Refinement) model which app
 
 Pytorch version Reference : https://github.com/Janspiry/Image-Super-Resolution-via-Iterative-Refinement
 
+Used Efficient-Attention(https://github.com/cmsflash/efficient-attention) instead of vanilla self-attention for reasonable training time
+
 * Trained with FFHQ thumbnails(128x128) dataset : https://github.com/NVlabs/ffhq-dataset
 
 * Tested with CelebA-HQ 256x256 resized dataset : https://www.kaggle.com/badasstechie/celebahq-resized-256x256
