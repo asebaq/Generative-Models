@@ -1,7 +1,5 @@
 Implemented SR3(Image Super-Resolution via Iterative Refinement) model which applied diffusion model framework to Super Resolution task
 
-Pytorch version Reference : https://github.com/Janspiry/Image-Super-Resolution-via-Iterative-Refinement
-
 Used 2D Linear Attention instead of vanilla self-attention for reasonable memory usage
 
 * Trained with FFHQ thumbnails(128x128) dataset : https://github.com/NVlabs/ffhq-dataset
