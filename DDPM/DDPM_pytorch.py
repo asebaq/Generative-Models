@@ -415,4 +415,4 @@ if __name__ == "__main__":
     ddpm = DDPM(device, dataloader=dataloader, schedule_opt=schedule_opt, #in_channel=1, out_channel=1,
                 save_path='./ddpm.pt', load_path='./ddpm.pt', load=False, img_size=img_size, inner_channel=128, 
                 norm_groups=32, channel_mults=[1, 2, 2, 2], res_blocks=2, dropout=0.2, lr=5*1e-5, distributed=False)
-    ddpm.train(epoch=1000, verbose=50)
+    ddpm.train(epoch=250, verbose=50)
