@@ -409,7 +409,7 @@ if __name__ == "__main__":
     dataloader = DataLoader(data, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
 
     cuda = torch.cuda.is_available()
-    device = torch.device("cuda:1" if cuda else "cpu")
+    device = torch.device("cuda:0" if cuda else "cpu")
     schedule_opt = {'schedule':'linear', 'n_timestep':1000, 'linear_start':1e-4, 'linear_end':0.05}
 
     ddpm = DDPM(device, dataloader=dataloader, schedule_opt=schedule_opt, #in_channel=1, out_channel=1,
