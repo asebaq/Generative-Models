@@ -1,5 +1,5 @@
-Pytorch Implementation of vanilla DDPM
-
+Pytorch Implementation of vanilla DDPM with einops
+ 
 * Used 2D Linear Attention instead of vanilla self-attention for reasonable memory usage
 
 * Used CelebA-HQ 256x256 resized dataset : https://www.kaggle.com/badasstechie/celebahq-resized-256x256
