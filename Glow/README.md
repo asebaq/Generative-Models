@@ -1,4 +1,4 @@
-Pytorch Implementation of Glow
+Pytorch Implementation of Glow with einops
 
 * Used CelebA-HQ 256x256 resized dataset : https://www.kaggle.com/badasstechie/celebahq-resized-256x256
 
