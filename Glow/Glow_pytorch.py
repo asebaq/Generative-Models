@@ -307,7 +307,7 @@ class Glow():
         self.model.train()
         
         torchvision.utils.save_image(gen_imgs.detach().cpu(), img_path, 
-                                    normalize=True, nrow=int(np.sqrt(self.num_samples)), range=(-0.5,0.5)) 
+                                    normalize=True, nrow=int(np.sqrt(self.num_samples)), value_range=(-0.5,0.5)) 
         if temp:
             print(f'loss:{loss_value.item():.3f} / log(p):{log_p.mean():.3f} / log(det):{logdet.mean():.3f}')
         else:
@@ -320,7 +320,7 @@ class Glow():
             sample_z = self.sample_z(num_samples=num_samples)
             gen_imgs = self.model.reverse(sample_z)
             torchvision.utils.save_image(gen_imgs.detach().cpu(), f'Generated_Images.jpg', 
-                                        normalize=True, nrow=int(np.sqrt(num_samples)), range=(-0.5,0.5))
+                                        normalize=True, nrow=int(np.sqrt(num_samples)), value_range=(-0.5,0.5))
 
 
 if __name__ == "__main__":
