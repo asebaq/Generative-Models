@@ -282,7 +282,7 @@ class Glow():
                 n_pixel = c * h * w
                 imgs, n_bins = self.dequantize(imgs, n_bits=5)
 
-                log_p, logdet = self.model(imgs + torch.rand_like(imgs) / n_bins)
+                log_p, logdet = self.model(imgs + torch.randn_like(imgs) / n_bins)
                 loss = log_p + logdet - (np.log(n_bins) * n_pixel)
                 loss = - (loss / (np.log(2) * n_pixel)).mean()
 
