@@ -16,7 +16,6 @@ import math
 import os
 import copy
 
-
 """
     Define U-net Architecture:
     Approximate reverse diffusion process by using U-net
@@ -47,7 +46,7 @@ class FeatureWiseAffine(nn.Module):
         super(FeatureWiseAffine, self).__init__()
         self.use_affine_level = use_affine_level
         self.noise_func = nn.Sequential(
-            nn.Linear(in_channels, out_channels*(1+self.use_affine_level)))
+            nn.Linear(in_channels, out_channels * (1 + self.use_affine_level)))
 
     def forward(self, x, noise_embed):
         noise = self.noise_func(noise_embed).view(x.shape[0], -1, 1, 1)
@@ -95,6 +94,7 @@ class Block(nn.Module):
 
     def forward(self, x):
         return self.block(x)
+
 
 # Linear Multi-head Self-attention
 
@@ -181,7 +181,7 @@ class UNet(nn.Module):
             if not is_last:
                 downs.append(Downsample(pre_channel))
                 feat_channels.append(pre_channel)
-                now_res = now_res//2
+                now_res = now_res // 2
         self.downs = nn.ModuleList(downs)
 
         self.mid = nn.ModuleList([
@@ -196,14 +196,14 @@ class UNet(nn.Module):
         for ind in reversed(range(num_mults)):
             is_last = (ind < 1)
             channel_mult = inner_channel * channel_mults[ind]
-            for _ in range(0, res_blocks+1):
+            for _ in range(0, res_blocks + 1):
                 ups.append(ResBlock(
-                    pre_channel+feat_channels.pop(), channel_mult, noise_level_emb_dim=noise_level_channel,
+                    pre_channel + feat_channels.pop(), channel_mult, noise_level_emb_dim=noise_level_channel,
                     norm_groups=norm_groups, dropout=dropout))
                 pre_channel = channel_mult
             if not is_last:
                 ups.append(Upsample(pre_channel))
-                now_res = now_res*2
+                now_res = now_res * 2
 
         self.ups = nn.ModuleList(ups)
 
@@ -327,7 +327,7 @@ class Diffusion(nn.Module):
     # Compute mean and log variance of posterior(reverse diffusion process) distribution
     def q_posterior(self, x_start, x_t, t):
         posterior_mean = self.posterior_mean_coef1[t] * \
-            x_start + self.posterior_mean_coef2[t] * x_t
+                         x_start + self.posterior_mean_coef2[t] * x_t
         posterior_log_variance_clipped = self.posterior_log_variance_clipped[t]
         return posterior_mean, posterior_log_variance_clipped
 
@@ -337,7 +337,7 @@ class Diffusion(nn.Module):
     def p_mean_variance(self, x, t, clip_denoised: bool, condition_x=None):
         batch_size = x.shape[0]
         noise_level = torch.FloatTensor(
-            [self.sqrt_alphas_cumprod_prev[t+1]]).repeat(batch_size, 1).to(x.device)
+            [self.sqrt_alphas_cumprod_prev[t + 1]]).repeat(batch_size, 1).to(x.device)
         x_recon = self.predict_start(x, t, noise=self.model(
             torch.cat([condition_x, x], dim=1), noise_level))
 
@@ -374,13 +374,13 @@ class Diffusion(nn.Module):
         t = np.random.randint(1, self.num_timesteps + 1)
         sqrt_alpha = torch.FloatTensor(
             np.random.uniform(
-                self.sqrt_alphas_cumprod_prev[t-1], self.sqrt_alphas_cumprod_prev[t], size=b)
+                self.sqrt_alphas_cumprod_prev[t - 1], self.sqrt_alphas_cumprod_prev[t], size=b)
         ).to(x_start.device)
         sqrt_alpha = sqrt_alpha.view(-1, 1, 1, 1)
 
         noise = torch.randn_like(x_start).to(x_start.device)
         # Perturbed image obtained by forward diffusion process at random time step t
-        x_noisy = sqrt_alpha * x_start + (1 - sqrt_alpha**2).sqrt() * noise
+        x_noisy = sqrt_alpha * x_start + (1 - sqrt_alpha ** 2).sqrt() * noise
         # The model predict actual noise added at time step t
         pred_noise = self.model(
             torch.cat([lr_imgs, x_noisy], dim=1), noise_level=sqrt_alpha)
@@ -449,19 +449,19 @@ class SR3():
 
         for i in tqdm(range(epoch)):
             train_loss = 0
-            for _, imgs in enumerate(self.dataloader):
+            for imgs in self.dataloader:
                 # Initial imgs are high-resolution
                 imgs = imgs[0].to(self.device)
                 b, c, h, w = imgs.shape
 
                 self.optimizer.zero_grad()
                 loss = self.sr3(imgs)
-                loss = loss.sum() / int(b*c*h*w)
+                loss = loss.sum() / int(b * c * h * w)
                 loss.backward()
                 self.optimizer.step()
                 train_loss += loss.item() * b
 
-            if (i+1) % verbose == 0:
+            if (i + 1) % verbose == 0:
                 self.sr3.eval()
                 test_imgs = next(iter(self.testloader))
                 test_imgs = test_imgs[0].to(self.device)
@@ -469,12 +469,12 @@ class SR3():
 
                 with torch.no_grad():
                     val_loss = self.sr3(test_imgs)
-                    val_loss = val_loss.sum() / int(b*c*h*w)
+                    val_loss = val_loss.sum() / int(b * c * h * w)
                 self.sr3.train()
 
                 train_loss = train_loss / len(self.dataloader)
                 print(
-                    f'Epoch: {i+1} / loss:{train_loss:.3f} / val_loss:{val_loss.item():.3f}')
+                    f'Epoch: {i + 1} / loss:{train_loss:.3f} / val_loss:{val_loss.item():.3f}')
 
                 # Save example of test images to check training
                 plt.figure(figsize=(15, 10))
@@ -482,7 +482,8 @@ class SR3():
                 plt.axis("off")
                 plt.title("Low-Resolution Inputs")
                 plt.imshow(np.transpose(torchvision.utils.make_grid(fixed_imgs,
-                                                                    nrow=2, padding=1, normalize=True).cpu(), (1, 2, 0)))
+                                                                    nrow=2, padding=1, normalize=True).cpu(),
+                                        (1, 2, 0)))
 
                 plt.subplot(1, 2, 2)
                 plt.axis("off")
@@ -525,11 +526,11 @@ class SR3():
 
 
 if __name__ == "__main__":
-    batch_size = 4
-    LR_size = 32
-    img_size = 128
-    root = '/home/asebaq/Downloads/thumbnails128x128'
-    testroot = '/home/asebaq/Downloads/CelebAMask-HQ'
+    batch_size = 2
+    LR_size = 64
+    img_size = 256
+    root = '/home/asebaq/Desktop/healthy_aug_22_good'
+    testroot = '/home/asebaq/Desktop/healthy_aug_22_good_test'
 
     transforms_ = transforms.Compose([transforms.Resize(img_size), transforms.ToTensor(),
                                       transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
@@ -538,22 +539,22 @@ if __name__ == "__main__":
     testloader = DataLoader(torchvision.datasets.ImageFolder(testroot, transform=transforms_),
                             batch_size=4, shuffle=True, num_workers=8, pin_memory=True)
 
-    # # Save train data example
-    # imgs, _ = next(iter(dataloader))
-    # LR_imgs = transforms.Resize(img_size)(transforms.Resize(LR_size)(imgs))
-    # plt.figure(figsize=(15,10))
-    # plt.subplot(1,2,1)
-    # plt.axis("off")
-    # plt.title("Low-Resolution Images")
-    # plt.imshow(np.transpose(torchvision.utils.make_grid(LR_imgs[:4], padding=1, normalize=True).cpu(),(1,2,0)))
+    # Save train data example
+    imgs, _ = next(iter(dataloader))
+    LR_imgs = transforms.Resize(img_size)(transforms.Resize(LR_size)(imgs))
+    plt.figure(figsize=(15, 10))
+    plt.subplot(1, 2, 1)
+    plt.axis("off")
+    plt.title("Low-Resolution Images")
+    plt.imshow(np.transpose(torchvision.utils.make_grid(LR_imgs[:4], padding=1, normalize=True).cpu(), (1, 2, 0)))
 
-    # plt.subplot(1,2,2)
-    # plt.axis("off")
-    # plt.title("High-Resolution Images")
-    # plt.imshow(np.transpose(torchvision.utils.make_grid(imgs[:4], padding=1, normalize=True).cpu(),(1,2,0)))
-    # plt.savefig('Train_Examples.jpg')
-    # plt.close()
-    # print("Example train images were saved")
+    plt.subplot(1, 2, 2)
+    plt.axis("off")
+    plt.title("High-Resolution Images")
+    plt.imshow(np.transpose(torchvision.utils.make_grid(imgs[:4], padding=1, normalize=True).cpu(), (1, 2, 0)))
+    plt.savefig('Train_Examples.jpg')
+    plt.close()
+    print("Example train images were saved")
 
     cuda = torch.cuda.is_available()
     device = torch.device("cuda:0" if cuda else "cpu")
@@ -564,4 +565,4 @@ if __name__ == "__main__":
               dataloader=dataloader, testloader=testloader, schedule_opt=schedule_opt,
               save_path='./SR3.pt', load_path='./SR3.pt', load=False, inner_channel=96,
               norm_groups=16, channel_mults=(1, 2, 2, 2), dropout=0.2, res_blocks=2, lr=1e-5, distributed=False)
-    sr3.train(epoch=250, verbose=25)
+    sr3.train(epoch=1000, verbose=1)
