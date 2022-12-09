@@ -8,3 +8,4 @@ matplotlib
 # pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu113 #nu
 autopep8
 ipywidgets
+jupyter

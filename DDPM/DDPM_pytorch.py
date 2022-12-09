@@ -28,9 +28,11 @@ class TimeEmbed(nn.Module):
         embed = torch.cat([embed.sin(), embed.cos()], dim=-1)
         return embed
 
+
 class Mish(nn.Module):
     def forward(self, x):
         return x * torch.tanh(F.softplus(x))
+
 
 class Upsample(nn.Module):
     def __init__(self, dim):
@@ -41,6 +43,7 @@ class Upsample(nn.Module):
     def forward(self, x):
         return self.conv(self.up(x))
 
+
 class Downsample(nn.Module):
     def __init__(self, dim):
         super().__init__()
@@ -48,6 +51,7 @@ class Downsample(nn.Module):
 
     def forward(self, x):
         return self.conv(x)
+
 
 class Block(nn.Module):
     def __init__(self, dim, dim_out, groups=32, dropout=0):
@@ -62,17 +66,18 @@ class Block(nn.Module):
     def forward(self, x):
         return self.block(x)
 
+
 # Linear Multi-head Self-attention
 class SelfAtt(nn.Module):
     def __init__(self, channel_dim, num_heads, norm_groups=32):
-        super(SelfAtt,self).__init__()        
+        super(SelfAtt, self).__init__()
         self.groupnorm = nn.GroupNorm(norm_groups, channel_dim)
         self.channel_dim = channel_dim
         self.num_heads = num_heads
         self.qkv = nn.Conv2d(channel_dim, channel_dim * 3, 1, bias=False)
         self.proj = nn.Conv2d(channel_dim, channel_dim, 1)
 
-    def forward(self,x):
+    def forward(self, x):
         b, c, h, w = x.size()
         x = self.groupnorm(x)
         qkv = rearrange(self.qkv(x), "b (qkv heads c) h w -> (qkv) b heads c (h w)", heads=self.num_heads, qkv=3)
@@ -108,14 +113,14 @@ class ResBlock(nn.Module):
 
 class UNet(nn.Module):
     def __init__(self, in_channel=3, out_channel=3, inner_channel=32, norm_groups=32,
-        channel_mults=(1, 2, 4, 8, 8), res_blocks=3, img_size=128, dropout=0):
+                 channel_mults=(1, 2, 4, 8, 8), res_blocks=3, img_size=128, dropout=0):
         super().__init__()
 
         noise_level_channel = inner_channel
         self.time_embed = nn.Sequential(
             TimeEmbed(inner_channel),
             nn.Linear(inner_channel, inner_channel * 4),
-            Mish(), 
+            Mish(),
             nn.Linear(inner_channel * 4, inner_channel)
         )
 
@@ -130,21 +135,21 @@ class UNet(nn.Module):
             is_last = (ind == num_mults - 1)
             channel_mult = inner_channel * channel_mults[ind]
             for _ in range(0, res_blocks):
-                downs.append(ResBlock(pre_channel, channel_mult, time_emb_dim=noise_level_channel, 
-                                        norm_groups=norm_groups, dropout=dropout))
+                downs.append(ResBlock(pre_channel, channel_mult, time_emb_dim=noise_level_channel,
+                                      norm_groups=norm_groups, dropout=dropout))
                 feat_channels.append(channel_mult)
                 pre_channel = channel_mult
             if not is_last:
                 downs.append(Downsample(pre_channel))
                 feat_channels.append(pre_channel)
-                now_res = now_res//2
+                now_res = now_res // 2
         self.downs = nn.ModuleList(downs)
 
         self.mid = nn.ModuleList([
-            ResBlock(pre_channel, pre_channel, time_emb_dim=noise_level_channel, 
-                        norm_groups=norm_groups, dropout=dropout),
-            ResBlock(pre_channel, pre_channel, time_emb_dim=noise_level_channel, 
-                        norm_groups=norm_groups, dropout=dropout, att=False)
+            ResBlock(pre_channel, pre_channel, time_emb_dim=noise_level_channel,
+                     norm_groups=norm_groups, dropout=dropout),
+            ResBlock(pre_channel, pre_channel, time_emb_dim=noise_level_channel,
+                     norm_groups=norm_groups, dropout=dropout, att=False)
         ])
 
         # Upsampling stage of U-net
@@ -152,13 +157,13 @@ class UNet(nn.Module):
         for ind in reversed(range(num_mults)):
             is_last = (ind < 1)
             channel_mult = inner_channel * channel_mults[ind]
-            for _ in range(0, res_blocks+1):
-                ups.append(ResBlock(pre_channel+feat_channels.pop(), channel_mult, time_emb_dim=noise_level_channel, 
+            for _ in range(0, res_blocks + 1):
+                ups.append(ResBlock(pre_channel + feat_channels.pop(), channel_mult, time_emb_dim=noise_level_channel,
                                     norm_groups=norm_groups, dropout=dropout))
                 pre_channel = channel_mult
             if not is_last:
                 ups.append(Upsample(pre_channel))
-                now_res = now_res*2
+                now_res = now_res * 2
 
         self.ups = nn.ModuleList(ups)
 
@@ -167,7 +172,7 @@ class UNet(nn.Module):
     def forward(self, x, t):
         # Embedding of time step with noise coefficient alpha
         t = self.time_embed(t)
-        
+
         feats = []
         for layer in self.downs:
             if isinstance(layer, ResBlock):
@@ -231,8 +236,10 @@ class Diffusion(nn.Module):
         self.register_buffer('variance', to_torch(variance))
         # below: log calculation clipped because the posterior variance is 0 at the beginning of the diffusion chain
         self.register_buffer('posterior_log_variance_clipped', to_torch(np.log(np.maximum(variance, 1e-20))))
-        self.register_buffer('posterior_mean_coef1', to_torch(betas * np.sqrt(alphas_cumprod_prev) / (1. - alphas_cumprod)))
-        self.register_buffer('posterior_mean_coef2', to_torch((1. - alphas_cumprod_prev) * np.sqrt(alphas) / (1. - alphas_cumprod)))
+        self.register_buffer('posterior_mean_coef1',
+                             to_torch(betas * np.sqrt(alphas_cumprod_prev) / (1. - alphas_cumprod)))
+        self.register_buffer('posterior_mean_coef2',
+                             to_torch((1. - alphas_cumprod_prev) * np.sqrt(alphas) / (1. - alphas_cumprod)))
 
     # Predict desired image x_0 from x_t with noise z_t -> Output is predicted x_0
     def predict_start(self, x_t, t, noise):
@@ -278,16 +285,16 @@ class Diffusion(nn.Module):
         b, c, h, w = x_start.shape
         t = np.random.randint(1, self.num_timesteps + 1)
         sqrt_alpha = torch.FloatTensor(
-            np.random.uniform(self.sqrt_alphas_cumprod_prev[t-1], self.sqrt_alphas_cumprod_prev[t], size=b)
+            np.random.uniform(self.sqrt_alphas_cumprod_prev[t - 1], self.sqrt_alphas_cumprod_prev[t], size=b)
         ).to(x_start.device)
         sqrt_alpha = sqrt_alpha.view(-1, 1, 1, 1)
 
         noise = torch.randn_like(x_start).to(x_start.device)
         # Perturbed image obtained by forward diffusion process at random time step t
-        x_noisy = sqrt_alpha * x_start + (1 - sqrt_alpha**2).sqrt() * noise
+        x_noisy = sqrt_alpha * x_start + (1 - sqrt_alpha ** 2).sqrt() * noise
         # The model predict actual noise added at time step t
         pred_noise = self.model(x_noisy, t=torch.full((b, 1), t, device=x_start.device))
-        
+
         return self.loss_func(noise, pred_noise)
 
     def forward(self, x, *args, **kwargs):
@@ -296,10 +303,10 @@ class Diffusion(nn.Module):
 
 # Class to train & test desired model
 class DDPM():
-    def __init__(self, device, dataloader, schedule_opt, save_path, 
-                    load_path=None, load=False, in_channel=3, out_channel=3, inner_channel=32, 
-                    norm_groups=16, channel_mults=[1, 2, 4, 8, 8], res_blocks=3, dropout=0,
-                    img_size=64, lr=1e-4, distributed=False):
+    def __init__(self, device, dataloader, schedule_opt, save_path,
+                 load_path=None, load=False, in_channel=3, out_channel=3, inner_channel=32,
+                 norm_groups=16, channel_mults=[1, 2, 4, 8, 8], res_blocks=3, dropout=0,
+                 img_size=64, lr=1e-4, distributed=False):
         super(DDPM, self).__init__()
         self.dataloader = dataloader
         self.device = device
@@ -348,21 +355,21 @@ class DDPM():
             for _, imgs in enumerate(self.dataloader):
                 imgs = imgs[0].to(self.device)
                 b, c, h, w = imgs.shape
-    
+
                 self.optimizer.zero_grad()
                 loss = self.ddpm(imgs)
-                loss = loss.sum() / int(b*c*h*w)
+                loss = loss.sum() / int(b * c * h * w)
                 loss.backward()
                 self.optimizer.step()
                 train_loss += loss.item() * b
 
-            if (i+1) % verbose == 0:
-                print(f'Epoch: {i+1} / loss:{train_loss / len(self.dataloader):.3f}')
+            if (i + 1) % verbose == 0:
+                print(f'Epoch: {i + 1} / loss:{train_loss / len(self.dataloader):.3f}')
 
                 # Save example of test images to check training
                 gen_imgs = self.test(fixed_noise)
                 gen_imgs = np.transpose(torchvision.utils.make_grid(
-                                    gen_imgs.detach().cpu(), nrow=4, padding=2, normalize=True),(1,2,0))
+                    gen_imgs.detach().cpu(), nrow=4, padding=2, normalize=True), (1, 2, 0))
                 matplotlib.image.imsave('Generated_Images.jpg', gen_imgs.numpy())
 
                 # Save model weight
@@ -378,7 +385,6 @@ class DDPM():
         self.ddpm.train()
         return gen_imgs
 
-    
     def save(self, save_path):
         network = self.ddpm
         if isinstance(self.ddpm, nn.DataParallel):
@@ -400,8 +406,8 @@ if __name__ == "__main__":
     batch_size = 12
     img_size = 128
     root = './data/celeba_hq'
-    transforms_ = transforms.Compose([transforms.Resize(img_size), transforms.ToTensor(), 
-                        transforms.Normalize((0.5,0.5,0.5), (0.5,0.5,0.5))])
+    transforms_ = transforms.Compose([transforms.Resize(img_size), transforms.ToTensor(),
+                                      transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
     # transform_ = transforms.Compose([transforms.Resize(img_size), transforms.ToTensor(), 
     #                         transforms.Normalize(mean=(0.5,), std=(0.5,))])
     data = torchvision.datasets.ImageFolder(root, transform=transforms_)
@@ -410,9 +416,9 @@ if __name__ == "__main__":
 
     cuda = torch.cuda.is_available()
     device = torch.device("cuda:0" if cuda else "cpu")
-    schedule_opt = {'schedule':'linear', 'n_timestep':1000, 'linear_start':1e-4, 'linear_end':0.05}
+    schedule_opt = {'schedule': 'linear', 'n_timestep': 1000, 'linear_start': 1e-4, 'linear_end': 0.05}
 
-    ddpm = DDPM(device, dataloader=dataloader, schedule_opt=schedule_opt, #in_channel=1, out_channel=1,
-                save_path='./ddpm.pt', load_path='./ddpm.pt', load=False, img_size=img_size, inner_channel=128, 
-                norm_groups=32, channel_mults=[1, 2, 2, 2], res_blocks=2, dropout=0.2, lr=5*1e-5, distributed=False)
+    ddpm = DDPM(device, dataloader=dataloader, schedule_opt=schedule_opt,  # in_channel=1, out_channel=1,
+                save_path='./ddpm.pt', load_path='./ddpm.pt', load=False, img_size=img_size, inner_channel=128,
+                norm_groups=32, channel_mults=[1, 2, 2, 2], res_blocks=2, dropout=0.2, lr=5 * 1e-5, distributed=False)
     ddpm.train(epoch=250, verbose=50)

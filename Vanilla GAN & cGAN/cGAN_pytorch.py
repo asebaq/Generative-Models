@@ -5,7 +5,7 @@ from tqdm.notebook import tqdm
 
 
 class Generator(nn.Module):
-    def __init__(self, img_shape, num_class, dim_latent, g_dims=[128,256,512,1024]):
+    def __init__(self, img_shape, num_class, dim_latent, g_dims=(128, 256, 512, 1024)):
         super(Generator, self).__init__()
         self.dim_latent = int(dim_latent)
         self.img_shape = img_shape
@@ -19,9 +19,9 @@ class Generator(nn.Module):
             return layers
 
         self._blocks = []
-        self._blocks += block(self.dim_latent+self.num_class, g_dims[0], normalize=False)
-        for i in range(len(g_dims)-1):
-            self._blocks += block(g_dims[i], g_dims[i+1])
+        self._blocks += block(self.dim_latent + self.num_class, g_dims[0], normalize=False)
+        for i in range(len(g_dims) - 1):
+            self._blocks += block(g_dims[i], g_dims[i + 1])
         self._blocks = np.reshape(self._blocks, -1).tolist()
         self.total_block = nn.Sequential(*self._blocks)
 
@@ -38,7 +38,7 @@ class Generator(nn.Module):
 
 
 class Discriminator(nn.Module):
-    def __init__(self, img_shape, num_class, d_dims=[512, 256]):
+    def __init__(self, img_shape, num_class, d_dims=(512, 256)):
         super(Discriminator, self).__init__()
         self.img_shape = img_shape
         self.num_class = num_class
@@ -49,9 +49,9 @@ class Discriminator(nn.Module):
             return layers
 
         self._blocks = []
-        self._blocks += block(int(np.prod(self.img_shape))+self.num_class, d_dims[0])
-        for i in range(len(d_dims)-1):
-            self._blocks += block(d_dims[i], d_dims[i+1])
+        self._blocks += block(int(np.prod(self.img_shape)) + self.num_class, d_dims[0])
+        for i in range(len(d_dims) - 1):
+            self._blocks += block(d_dims[i], d_dims[i + 1])
         self.total_block = nn.Sequential(*self._blocks)
 
         self.fc = nn.Sequential(nn.Linear(d_dims[-1], 1), nn.Sigmoid())
@@ -73,17 +73,17 @@ def Train(epoch, dataloader, device, G, D, optimizer_G, optimizer_D):
     for j in tqdm(range(epoch)):
         for _, (imgs, labels) in enumerate(dataloader):
             batch_size = imgs.size(0)
-            
+
             # Adversarial ground truths
             y_valid = torch.ones(batch_size, 1).to(device)
             y_fake = torch.zeros(batch_size, 1).to(device)
-            
+
             # Label to proper vector tensor
             y_vec = torch.zeros(batch_size, num_class).scatter_(1, labels.unsqueeze(1), 1).to(device)
-            
+
             # Configure input
             real_imgs = imgs.type(Tensor).to(device)
-            
+
             # Sample noise as generator input
             z = torch.rand(batch_size, dim_latent).to(device)
 
@@ -104,5 +104,5 @@ def Train(epoch, dataloader, device, G, D, optimizer_G, optimizer_D):
             g_loss.backward()
             optimizer_G.step()
 
-        if (j+1)%5 == 0:
-            print(f"Epoch {j+1} / D loss: {d_loss.item():.4f} / G loss: {g_loss.item():.4f}")
+        if (j + 1) % 5 == 0:
+            print(f"Epoch {j + 1} / D loss: {d_loss.item():.4f} / G loss: {g_loss.item():.4f}")
