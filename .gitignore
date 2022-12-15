@@ -130,3 +130,8 @@ dmypy.json
 */models
 */results
 */runs
+*.pt
+*.ckpt
+*.zip
+*.png
+*.jpg

@@ -1,18 +1,20 @@
-import torch, torchvision
+import math
+from functools import partial
+
+import matplotlib
+import matplotlib.pyplot as plt
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+import torchvision
+import torchvision.transforms as transforms
+from einops import rearrange
 from torch import nn
 from torch.nn import init
-import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
-import torchvision.transforms as transforms
-
-from einops import rearrange, repeat
+from torch.utils.data import DataLoader
 from tqdm.notebook import tqdm
-from functools import partial
-from PIL import Image
-import matplotlib.pyplot as plt
-import matplotlib
-import numpy as np
-import math, os, copy
+from torch.utils.tensorboard import SummaryWriter
 
 
 class TimeEmbed(nn.Module):
@@ -37,7 +39,7 @@ class Mish(nn.Module):
 class Upsample(nn.Module):
     def __init__(self, dim):
         super().__init__()
-        self.up = nn.Upsample(scale_factor=2, mode="nearest")
+        self.up = nn.Upsample(scale_factor=2, mode='nearest')
         self.conv = nn.Conv2d(dim, dim, 3, padding=1)
 
     def forward(self, x):
@@ -80,7 +82,7 @@ class SelfAtt(nn.Module):
     def forward(self, x):
         b, c, h, w = x.size()
         x = self.groupnorm(x)
-        qkv = rearrange(self.qkv(x), "b (qkv heads c) h w -> (qkv) b heads c (h w)", heads=self.num_heads, qkv=3)
+        qkv = rearrange(self.qkv(x), 'b (qkv heads c) h w -> (qkv) b heads c (h w)', heads=self.num_heads, qkv=3)
         queries, keys, values = qkv[0], qkv[1], qkv[2]
 
         keys = F.softmax(keys, dim=-1)
@@ -305,7 +307,7 @@ class Diffusion(nn.Module):
 class DDPM():
     def __init__(self, device, dataloader, schedule_opt, save_path,
                  load_path=None, load=False, in_channel=3, out_channel=3, inner_channel=32,
-                 norm_groups=16, channel_mults=[1, 2, 4, 8, 8], res_blocks=3, dropout=0,
+                 norm_groups=16, channel_mults=(1, 2, 4, 8, 8), res_blocks=3, dropout=0,
                  img_size=64, lr=1e-4, distributed=False):
         super(DDPM, self).__init__()
         self.dataloader = dataloader
@@ -313,6 +315,7 @@ class DDPM():
         self.save_path = save_path
         self.in_channel = in_channel
         self.img_size = img_size
+
 
         model = UNet(in_channel, out_channel, inner_channel, norm_groups, channel_mults, res_blocks, img_size)
         self.ddpm = Diffusion(model, device, out_channel)
@@ -326,9 +329,11 @@ class DDPM():
             self.ddpm = nn.DataParallel(self.ddpm)
 
         self.optimizer = torch.optim.Adam(self.ddpm.parameters(), lr=lr)
+        self.current_epoch = 0
+        self.train_loss = 0
 
         params = sum(p.numel() for p in self.ddpm.parameters())
-        print(f"Number of model parameters : {params}")
+        print(f'Number of model parameters : {params}')
 
         if load:
             self.load(load_path)
@@ -349,9 +354,10 @@ class DDPM():
 
     def train(self, epoch, verbose):
         fixed_noise = torch.randn(16, self.in_channel, self.img_size, self.img_size).to(self.device)
+        writer = SummaryWriter()
 
-        for i in tqdm(range(epoch)):
-            train_loss = 0
+        for i in tqdm(range(self.current_epoch, epoch)):
+            self.train_loss = 0
             for _, imgs in enumerate(self.dataloader):
                 imgs = imgs[0].to(self.device)
                 b, c, h, w = imgs.shape
@@ -361,10 +367,10 @@ class DDPM():
                 loss = loss.sum() / int(b * c * h * w)
                 loss.backward()
                 self.optimizer.step()
-                train_loss += loss.item() * b
-
+                self.train_loss += loss.item() * b
+            self.current_epoch += 1
             if (i + 1) % verbose == 0:
-                print(f'Epoch: {i + 1} / loss:{train_loss / len(self.dataloader):.3f}')
+                print(f'Epoch: {i + 1} / loss:{self.train_loss / len(self.dataloader):.3f}')
 
                 # Save example of test images to check training
                 gen_imgs = self.test(fixed_noise)
@@ -374,6 +380,8 @@ class DDPM():
 
                 # Save model weight
                 self.save(self.save_path)
+                writer.add_scalar('Epoch', self.current_epoch, self.current_epoch)
+                writer.add_scalar('Loss/train', self.train_loss / len(self.dataloader), self.current_epoch)
 
     def test(self, imgs):
         self.ddpm.eval()
@@ -392,33 +400,48 @@ class DDPM():
         state_dict = network.state_dict()
         for key, param in state_dict.items():
             state_dict[key] = param.cpu()
-        torch.save(state_dict, save_path)
+        # torch.save(state_dict, save_path)
+        torch.save({
+            'epoch': self.current_epoch,
+            'model_state_dict': state_dict,
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'loss': self.train_loss,
+        }, save_path)
 
-    def load(self, load_path):
+    def load_(self, load_path):
         network = self.ddpm
         if isinstance(self.ddpm, nn.DataParallel):
             network = network.module
         network.load_state_dict(torch.load(load_path))
-        print("Model loaded successfully")
+        print('Model loaded successfully')
+
+    def load(self, load_path):
+        network = self.ddpm
+        checkpoint = torch.load(load_path)
+        if isinstance(self.ddpm, nn.DataParallel):
+            network = network.module
+        network.load_state_dict(checkpoint['model_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.current_epoch = checkpoint['epoch']
+        self.train_loss = checkpoint['loss']
+        print('Model loaded successfully')
 
 
-if __name__ == "__main__":
-    batch_size = 12
-    img_size = 128
-    root = './data/celeba_hq'
-    transforms_ = transforms.Compose([transforms.Resize(img_size), transforms.ToTensor(),
+if __name__ == '__main__':
+    batch_size = 2
+    img_size = 64
+    root = '/home/asebaq/CholecT50_sample/data/images'
+    transforms_ = transforms.Compose([transforms.Resize((img_size, img_size)), transforms.ToTensor(),
                                       transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
-    # transform_ = transforms.Compose([transforms.Resize(img_size), transforms.ToTensor(), 
-    #                         transforms.Normalize(mean=(0.5,), std=(0.5,))])
+
     data = torchvision.datasets.ImageFolder(root, transform=transforms_)
-    # data = torchvision.datasets.CIFAR10(root='./data', download=True, transform=transforms_)
     dataloader = DataLoader(data, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
 
     cuda = torch.cuda.is_available()
-    device = torch.device("cuda:0" if cuda else "cpu")
+    device = torch.device('cuda' if cuda else 'cpu')
     schedule_opt = {'schedule': 'linear', 'n_timestep': 1000, 'linear_start': 1e-4, 'linear_end': 0.05}
 
-    ddpm = DDPM(device, dataloader=dataloader, schedule_opt=schedule_opt,  # in_channel=1, out_channel=1,
-                save_path='./ddpm.pt', load_path='./ddpm.pt', load=False, img_size=img_size, inner_channel=128,
+    ddpm = DDPM(device, dataloader=dataloader, schedule_opt=schedule_opt,
+                save_path='ddpm_medical.ckpt', load_path='ddpm_medical.ckpt', load=True, img_size=img_size, inner_channel=128,
                 norm_groups=32, channel_mults=[1, 2, 2, 2], res_blocks=2, dropout=0.2, lr=5 * 1e-5, distributed=False)
-    ddpm.train(epoch=250, verbose=50)
+    ddpm.train(epoch=1000, verbose=1)

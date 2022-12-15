@@ -9,3 +9,4 @@ matplotlib
 autopep8
 ipywidgets
 jupyter
+tensorboard
