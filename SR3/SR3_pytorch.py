@@ -392,7 +392,7 @@ class Diffusion(nn.Module):
 
 
 # Class to train & test desired model
-class SR3():
+class SR3:
     def __init__(self, device, img_size, LR_size, loss_type, dataloader, testloader,
                  schedule_opt, save_path, load_path=None, load=False,
                  in_channel=6, out_channel=3, inner_channel=32, norm_groups=8,

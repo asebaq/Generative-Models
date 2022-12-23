@@ -115,7 +115,7 @@ class ResBlock(nn.Module):
 
 class UNet(nn.Module):
     def __init__(self, in_channel=3, out_channel=3, inner_channel=32, norm_groups=32,
-                 channel_mults=(1, 2, 4, 8, 8), res_blocks=3, img_size=128, dropout=0):
+                 channel_mults=(1, 2, 4, 8, 8), res_blocks=3, img_size=128, dropout=0, num_classes=None):
         super().__init__()
 
         noise_level_channel = inner_channel
@@ -171,9 +171,15 @@ class UNet(nn.Module):
 
         self.final_conv = Block(pre_channel, out_channel, groups=norm_groups)
 
-    def forward(self, x, t):
+        if num_classes is not None:
+            self.lbl_emb = nn.Embedding(num_classes, inner_channel)
+
+    def forward(self, x, t, y):
         # Embedding of time step with noise coefficient alpha
         t = self.time_embed(t)
+
+        if y is not None:
+            t += self.lbl_emb
 
         feats = []
         for layer in self.downs:
@@ -256,9 +262,9 @@ class Diffusion(nn.Module):
     # Note that posterior q for reverse diffusion process is conditioned Gaussian distribution q(x_{t-1}|x_t, x_0)
     # Thus to compute desired posterior q, we need original image x_0 in ideal, 
     # but it's impossible for actual training procedure -> Thus we reconstruct desired x_0 and use this for posterior
-    def p_mean_variance(self, x, t, clip_denoised: bool, condition_x=None):
+    def p_mean_variance(self, x, t, lbl, clip_denoised: bool, condition_x=None):
         batch_size = x.shape[0]
-        x_recon = self.predict_start(x, t, noise=self.model(x, torch.full((batch_size, 1), t, device=x.device)))
+        x_recon = self.predict_start(x, t, noise=self.model(x, torch.full((batch_size, 1), t, device=x.device), lbl))
 
         if clip_denoised:
             x_recon.clamp_(-1., 1.)
@@ -283,7 +289,7 @@ class Diffusion(nn.Module):
         return img
 
     # Compute loss to train the model
-    def p_losses(self, x_start):
+    def p_losses(self, x_start, lbl):
         b, c, h, w = x_start.shape
         t = np.random.randint(1, self.num_timesteps + 1)
         sqrt_alpha = torch.FloatTensor(
@@ -295,12 +301,12 @@ class Diffusion(nn.Module):
         # Perturbed image obtained by forward diffusion process at random time step t
         x_noisy = sqrt_alpha * x_start + (1 - sqrt_alpha ** 2).sqrt() * noise
         # The model predict actual noise added at time step t
-        pred_noise = self.model(x_noisy, t=torch.full((b, 1), t, device=x_start.device))
+        pred_noise = self.model(x_noisy, torch.full((b, 1), t, device=x_start.device), lbl)
 
         return self.loss_func(noise, pred_noise)
 
-    def forward(self, x, *args, **kwargs):
-        return self.p_losses(x, *args, **kwargs)
+    def forward(self, x, lbl, *args, **kwargs):
+        return self.p_losses(x, lbl, *args, **kwargs)
 
 
 # Class to train & test desired model
@@ -308,7 +314,7 @@ class DDPM:
     def __init__(self, device, dataloader, schedule_opt, save_path,
                  load_path=None, load=False, in_channel=3, out_channel=3, inner_channel=32,
                  norm_groups=16, channel_mults=(1, 2, 4, 8, 8), res_blocks=3, dropout=0,
-                 img_size=64, lr=1e-4, distributed=False):
+                 img_size=64, lr=1e-4, num_classes=2, distributed=False):
         super(DDPM, self).__init__()
         self.dataloader = dataloader
         self.device = device
@@ -316,7 +322,7 @@ class DDPM:
         self.in_channel = in_channel
         self.img_size = img_size
 
-        model = UNet(in_channel, out_channel, inner_channel, norm_groups, channel_mults, res_blocks, img_size)
+        model = UNet(in_channel, out_channel, inner_channel, norm_groups, channel_mults, res_blocks, img_size, num_classes)
         self.ddpm = Diffusion(model, device, out_channel)
 
         # Apply weight initialization & set loss & set noise schedule
@@ -357,12 +363,13 @@ class DDPM:
 
         for i in tqdm(range(self.current_epoch, epoch)):
             self.train_loss = 0
-            for _, imgs in enumerate(self.dataloader):
+            for _, (imgs, lbls) in enumerate(self.dataloader):
                 imgs = imgs[0].to(self.device)
+                lbls = lbls[0].to(self.device)
                 b, c, h, w = imgs.shape
 
                 self.optimizer.zero_grad()
-                loss = self.ddpm(imgs)
+                loss = self.ddpm(imgs, lbls)
                 loss = loss.sum() / int(b * c * h * w)
                 loss.backward()
                 self.optimizer.step()
@@ -434,7 +441,6 @@ if __name__ == '__main__':
 
     transforms_ = transforms.Compose([transforms.Resize(img_size), transforms.ToTensor(),
                                       transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
-
 
     data = torchvision.datasets.ImageFolder(root, transform=transforms_)
     dataloader = DataLoader(data, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)

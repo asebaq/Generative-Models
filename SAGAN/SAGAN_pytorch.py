@@ -181,4 +181,4 @@ def Train(epoch, dataloader, device, z_dim, G, D, optimizer_G, optimizer_D, verb
             gen_imgs, _, _ = G(fixed_z)
             gen_imgs = np.transpose(torchvision.utils.make_grid(
                                     gen_imgs.detach().cpu(), padding=2, normalize=True),(1,2,0))
-            matplotlib.image.imsave('Generated_Images.jpg', gen_imgs.numpy())
+            matplotlib.image.imsave('Generated_Images_medical.jpg', gen_imgs.numpy())

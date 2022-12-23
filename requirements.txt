@@ -10,3 +10,4 @@ autopep8
 ipywidgets
 jupyter
 tensorboard
+opencv-python
