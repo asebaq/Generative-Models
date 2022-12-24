@@ -7,7 +7,8 @@ from torch.utils.data import DataLoader
 import torchvision.transforms as transforms
 
 from einops import rearrange, repeat
-from tqdm.notebook import tqdm
+# from tqdm.notebook import tqdm
+from tqdm import tqdm
 from functools import partial
 from PIL import Image
 import matplotlib.pyplot as plt

@@ -13,7 +13,8 @@ from einops import rearrange
 from torch import nn
 from torch.nn import init
 from torch.utils.data import DataLoader
-from tqdm.notebook import tqdm
+# from tqdm.notebook import tqdm
+from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 
 
@@ -355,9 +356,9 @@ class DDPM:
         fixed_noise = torch.randn(16, self.in_channel, self.img_size, self.img_size).to(self.device)
         writer = SummaryWriter()
 
-        for i in tqdm(range(self.current_epoch, epoch)):
+        for i in range(self.current_epoch, epoch):
             self.train_loss = 0
-            for _, imgs in enumerate(self.dataloader):
+            for _, imgs, in enumerate(tqdm(self.dataloader)):
                 imgs = imgs[0].to(self.device)
                 b, c, h, w = imgs.shape
 
@@ -434,7 +435,6 @@ if __name__ == '__main__':
 
     transforms_ = transforms.Compose([transforms.Resize(img_size), transforms.ToTensor(),
                                       transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
-
 
     data = torchvision.datasets.ImageFolder(root, transform=transforms_)
     dataloader = DataLoader(data, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)

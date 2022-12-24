@@ -3,6 +3,7 @@ from functools import partial
 
 import matplotlib
 import matplotlib.pyplot as plt
+import copy
 
 import numpy as np
 import torch
@@ -13,8 +14,37 @@ from einops import rearrange
 from torch import nn
 from torch.nn import init
 from torch.utils.data import DataLoader
-from tqdm.notebook import tqdm
+# from tqdm.notebook import tqdm
+from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
+
+
+class EMA:
+    def __init__(self, beta):
+        super().__init__()
+        self.beta = beta
+        self.step = 0
+
+    def update_model_average(self, ma_model, current_model):
+        for current_params, ma_params in zip(current_model.parameters(), ma_model.parameters()):
+            old_weight, up_weight = ma_params.data, current_params.data
+            ma_params.data = self.update_average(old_weight, up_weight)
+
+    def update_average(self, old, new):
+        if old is None:
+            return new
+        return old * self.beta + (1 - self.beta) * new
+
+    def step_ema(self, ema_model, model, step_start_ema=2000):
+        if self.step < step_start_ema:
+            self.reset_parameters(ema_model, model)
+            self.step += 1
+            return
+        self.update_model_average(ema_model, model)
+        self.step += 1
+
+    def reset_parameters(self, ema_model, model):
+        ema_model.load_state_dict(model.state_dict())
 
 
 class TimeEmbed(nn.Module):
@@ -179,7 +209,7 @@ class UNet(nn.Module):
         t = self.time_embed(t)
 
         if y is not None:
-            t += self.lbl_emb
+            t += torch.unsqueeze(self.lbl_emb(y), 1)
 
         feats = []
         for layer in self.downs:
@@ -212,9 +242,21 @@ class Diffusion(nn.Module):
     def make_beta_schedule(self, schedule, n_timestep, linear_start=1e-4, linear_end=2e-2):
         if schedule == 'linear':
             betas = np.linspace(linear_start, linear_end, n_timestep, dtype=np.float64)
+        elif schedule == 'cosine':
+            betas = self.cosine_beta_schedule(n_timestep)
         else:
             raise NotImplementedError(schedule)
         return betas
+
+    def cosine_beta_schedule(self, n_timestep):
+        betas = []
+        max_beta = 0.999
+        alpha_bar = lambda t: math.cos((t + 0.008) / 1.008 * math.pi / 2) ** 2
+        for i in range(n_timestep):
+            t1 = i / n_timestep
+            t2 = (i + 1) / n_timestep
+            betas.append(min(1 - alpha_bar(t2) / alpha_bar(t1), max_beta))
+        return np.array(betas, dtype=np.float64)
 
     def set_new_noise_schedule(self, schedule_opt):
         to_torch = partial(torch.tensor, dtype=torch.float32, device=self.device)
@@ -262,9 +304,15 @@ class Diffusion(nn.Module):
     # Note that posterior q for reverse diffusion process is conditioned Gaussian distribution q(x_{t-1}|x_t, x_0)
     # Thus to compute desired posterior q, we need original image x_0 in ideal, 
     # but it's impossible for actual training procedure -> Thus we reconstruct desired x_0 and use this for posterior
-    def p_mean_variance(self, x, t, lbl, clip_denoised: bool, condition_x=None):
+    def p_mean_variance(self, x, t, lbl, clip_denoised: bool, cfg_scale=3):
         batch_size = x.shape[0]
-        x_recon = self.predict_start(x, t, noise=self.model(x, torch.full((batch_size, 1), t, device=x.device), lbl))
+
+        pred_noise = self.model(x, torch.full((batch_size, 1), t, device=x.device), lbl)
+        if cfg_scale > 0:
+            uncond_pred_noise = self.model(x, torch.full((batch_size, 1), t, device=x.device), None)
+            pred_noise = torch.lerp(uncond_pred_noise, pred_noise, cfg_scale)
+
+        x_recon = self.predict_start(x, t, pred_noise)
 
         if clip_denoised:
             x_recon.clamp_(-1., 1.)
@@ -275,21 +323,21 @@ class Diffusion(nn.Module):
     # Progress single step of reverse diffusion process
     # Given mean and log variance of posterior, sample reverse diffusion result from the posterior
     @torch.no_grad()
-    def p_sample(self, x, t, clip_denoised=True):
-        mean, log_variance = self.p_mean_variance(x=x, t=t, clip_denoised=clip_denoised)
+    def p_sample(self, x, t, lbl, clip_denoised=True):
+        mean, log_variance = self.p_mean_variance(x=x, t=t, lbl=lbl, clip_denoised=clip_denoised)
         noise = torch.randn_like(x) if t > 0 else torch.zeros_like(x)
         return mean + noise * (0.5 * log_variance).exp()
 
     # Progress whole reverse diffusion process
     @torch.no_grad()
-    def generate(self, x_in):
+    def generate(self, x_in, lbl):
         img = torch.rand_like(x_in, device=x_in.device)
         for i in reversed(range(0, self.num_timesteps)):
-            img = self.p_sample(img, i)
+            img = self.p_sample(img, i, lbl)
         return img
 
     # Compute loss to train the model
-    def p_losses(self, x_start, lbl):
+    def p_losses(self, x_start, lbl, cfg_scale=3):
         b, c, h, w = x_start.shape
         t = np.random.randint(1, self.num_timesteps + 1)
         sqrt_alpha = torch.FloatTensor(
@@ -302,6 +350,10 @@ class Diffusion(nn.Module):
         x_noisy = sqrt_alpha * x_start + (1 - sqrt_alpha ** 2).sqrt() * noise
         # The model predict actual noise added at time step t
         pred_noise = self.model(x_noisy, torch.full((b, 1), t, device=x_start.device), lbl)
+
+        # if cfg_scale > 0:
+        #     uncond_pred_noise = self.model(x_noisy, torch.full((batch_size, 1), t, device=x_noisy.device), None)
+        #     pred_noise = torch.lerp(uncond_pred_noise, pred_noise, cfg_scale)
 
         return self.loss_func(noise, pred_noise)
 
@@ -322,7 +374,8 @@ class DDPM:
         self.in_channel = in_channel
         self.img_size = img_size
 
-        model = UNet(in_channel, out_channel, inner_channel, norm_groups, channel_mults, res_blocks, img_size, num_classes)
+        model = UNet(in_channel, out_channel, inner_channel, norm_groups, channel_mults, res_blocks, img_size,
+                     num_classes=num_classes)
         self.ddpm = Diffusion(model, device, out_channel)
 
         # Apply weight initialization & set loss & set noise schedule
@@ -358,49 +411,62 @@ class DDPM:
             init.constant_(m.bias.data, 0.0)
 
     def train(self, epoch, verbose):
-        fixed_noise = torch.randn(16, self.in_channel, self.img_size, self.img_size).to(self.device)
+        fixed_noise = torch.randn(4, self.in_channel, self.img_size, self.img_size).to(self.device)
+        fixed_lbl = torch.randint(0, 2, (4,)).to(self.device)
         writer = SummaryWriter()
+        ema = EMA(0.995)
+        ema_model = copy.deepcopy(self.ddpm).eval().requires_grad_(False)
 
-        for i in tqdm(range(self.current_epoch, epoch)):
+        for i in range(self.current_epoch, epoch):
+            print('Epoch:', i+1, '/', epoch)
             self.train_loss = 0
-            for _, (imgs, lbls) in enumerate(self.dataloader):
-                imgs = imgs[0].to(self.device)
-                lbls = lbls[0].to(self.device)
+            for _, (imgs, lbls) in enumerate(tqdm(self.dataloader)):
+                imgs = imgs.to(self.device)
+                lbls = lbls.to(self.device)
                 b, c, h, w = imgs.shape
 
                 self.optimizer.zero_grad()
+                if np.random.random() > 0.1:
+                    lbls = None
                 loss = self.ddpm(imgs, lbls)
                 loss = loss.sum() / int(b * c * h * w)
                 loss.backward()
                 self.optimizer.step()
+                ema.step_ema(ema_model, self.ddpm)
                 self.train_loss += loss.item() * b
             self.current_epoch += 1
             if (i + 1) % verbose == 0:
                 print(f'Epoch: {i + 1} / loss:{self.train_loss / len(self.dataloader):.3f}')
 
                 # Save example of test images to check training
-                gen_imgs = self.test(fixed_noise)
+                gen_imgs = self.test(self.ddpm, fixed_noise, fixed_lbl)
                 gen_imgs = np.transpose(torchvision.utils.make_grid(
-                    gen_imgs.detach().cpu(), nrow=4, padding=2, normalize=True), (1, 2, 0))
-                matplotlib.image.imsave('Generated_Images.jpg', gen_imgs.numpy())
+                    gen_imgs.detach().cpu(), nrow=2, padding=2, normalize=True), (1, 2, 0))
+                matplotlib.image.imsave('Generated_Images_CFG.jpg', gen_imgs.numpy())
+
+                # Save example of test images to check training
+                gen_imgs = self.test(ema_model, fixed_noise, fixed_lbl)
+                gen_imgs = np.transpose(torchvision.utils.make_grid(
+                    gen_imgs.detach().cpu(), nrow=2, padding=2, normalize=True), (1, 2, 0))
+                matplotlib.image.imsave('Generated_Images_EMA_CFG.jpg', gen_imgs.numpy())
 
                 # Save model weight
-                self.save(self.save_path)
+                self.save(self.save_path, self.ddpm)
+                self.save(self.save_path.replace('.ckpt', '_ema.ckpt'), ema_model)
                 writer.add_scalar('Epoch', self.current_epoch, self.current_epoch)
                 writer.add_scalar('Loss/train', self.train_loss / len(self.dataloader), self.current_epoch)
 
-    def test(self, imgs):
-        self.ddpm.eval()
+    def test(self, model, imgs, lbls):
+        model.eval()
         with torch.no_grad():
-            if isinstance(self.ddpm, nn.DataParallel):
-                gen_imgs = self.ddpm.module.generate(imgs)
+            if isinstance(model, nn.DataParallel):
+                gen_imgs = model.module.generate(imgs, lbls)
             else:
-                gen_imgs = self.ddpm.generate(imgs)
-        self.ddpm.train()
+                gen_imgs = model.generate(imgs, lbls)
+        model.train()
         return gen_imgs
 
-    def save(self, save_path):
-        network = self.ddpm
+    def save(self, save_path, network):
         if isinstance(self.ddpm, nn.DataParallel):
             network = network.module
         state_dict = network.state_dict()
@@ -413,13 +479,6 @@ class DDPM:
             'optimizer_state_dict': self.optimizer.state_dict(),
             'loss': self.train_loss,
         }, save_path)
-
-    def load_(self, load_path):
-        network = self.ddpm
-        if isinstance(self.ddpm, nn.DataParallel):
-            network = network.module
-        network.load_state_dict(torch.load(load_path))
-        print('Model loaded successfully')
 
     def load(self, load_path):
         network = self.ddpm
@@ -434,10 +493,11 @@ class DDPM:
 
 
 if __name__ == '__main__':
-    batch_size = 12
+    batch_size = 8
     img_size = 64
     # root = '/home/asebaq/CholecT50_sample/data/images'
-    root = '/home/asebaq/SAC/healthy_aug_22_good'
+    # root = '/home/asebaq/SAC/healthy_aug_22_good'
+    root = '/home/asebaq/Downloads/cifar-10-python/cifar-10-batches-py/cifar10-64/data'
 
     transforms_ = transforms.Compose([transforms.Resize(img_size), transforms.ToTensor(),
                                       transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
@@ -450,7 +510,8 @@ if __name__ == '__main__':
     schedule_opt = {'schedule': 'linear', 'n_timestep': 1000, 'linear_start': 1e-4, 'linear_end': 0.05}
 
     ddpm = DDPM(device, dataloader=dataloader, schedule_opt=schedule_opt,
-                save_path='ddpm.ckpt', load_path='ddpm.ckpt', load=True, img_size=img_size,
+                save_path='c_cfg_ddpm.ckpt', load_path='c_cfg_ddpm.ckpt', load=False, img_size=img_size,
                 inner_channel=128,
-                norm_groups=32, channel_mults=[1, 2, 2, 2], res_blocks=2, dropout=0.2, lr=5 * 1e-5, distributed=False)
+                norm_groups=32, channel_mults=[1, 2, 2, 2], res_blocks=2, dropout=0.2, lr=5 * 1e-5, num_classes=10,
+                distributed=False)
     ddpm.train(epoch=1000, verbose=1)
