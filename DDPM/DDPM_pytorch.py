@@ -16,6 +16,7 @@ from torch.utils.data import DataLoader
 # from tqdm.notebook import tqdm
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
+from utils.seed_everything import seed_everything
 
 
 class TimeEmbed(nn.Module):
@@ -57,7 +58,7 @@ class Downsample(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, dim, dim_out, groups=32, dropout=0):
+    def __init__(self, dim, dim_out, groups=32, dropout=0.0):
         super().__init__()
         self.block = nn.Sequential(
             nn.GroupNorm(groups, dim),
@@ -95,7 +96,7 @@ class SelfAtt(nn.Module):
 
 
 class ResBlock(nn.Module):
-    def __init__(self, dim, dim_out, time_emb_dim=None, norm_groups=32, num_heads=8, dropout=0, att=True):
+    def __init__(self, dim, dim_out, time_emb_dim=None, norm_groups=32, num_heads=8, dropout=0.0, att=True):
         super().__init__()
         self.mlp = nn.Sequential(Mish(), nn.Linear(time_emb_dim, dim_out))
         self.block1 = Block(dim, dim_out, groups=norm_groups)
@@ -116,7 +117,7 @@ class ResBlock(nn.Module):
 
 class UNet(nn.Module):
     def __init__(self, in_channel=3, out_channel=3, inner_channel=32, norm_groups=32,
-                 channel_mults=(1, 2, 4, 8, 8), res_blocks=3, img_size=128, dropout=0):
+                 channel_mults=(1, 2, 4, 8, 8), res_blocks=3, img_size=128, dropout=0.0):
         super().__init__()
 
         noise_level_channel = inner_channel
@@ -308,7 +309,7 @@ class Diffusion(nn.Module):
 class DDPM:
     def __init__(self, device, dataloader, schedule_opt, save_path,
                  load_path=None, load=False, in_channel=3, out_channel=3, inner_channel=32,
-                 norm_groups=16, channel_mults=(1, 2, 4, 8, 8), res_blocks=3, dropout=0,
+                 norm_groups=16, channel_mults=(1, 2, 4, 8, 8), res_blocks=3, dropout=0.0,
                  img_size=64, lr=1e-4, distributed=False):
         super(DDPM, self).__init__()
         self.dataloader = dataloader
@@ -432,6 +433,8 @@ if __name__ == '__main__':
     img_size = 64
     # root = '/home/asebaq/CholecT50_sample/data/images'
     root = '/home/asebaq/SAC/healthy_aug_22_good'
+    # Seed
+    seed_everything()
 
     transforms_ = transforms.Compose([transforms.Resize(img_size), transforms.ToTensor(),
                                       transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])

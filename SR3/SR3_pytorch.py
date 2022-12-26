@@ -16,6 +16,7 @@ import numpy as np
 import math
 import os
 import copy
+from utils.seed_everything import seed_everything
 
 """
     Define U-net Architecture:
@@ -84,7 +85,7 @@ class Downsample(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, dim, dim_out, groups=32, dropout=0):
+    def __init__(self, dim, dim_out, groups=32, dropout=0.0):
         super().__init__()
         self.block = nn.Sequential(
             nn.GroupNorm(groups, dim),
@@ -125,7 +126,7 @@ class SelfAtt(nn.Module):
 
 
 class ResBlock(nn.Module):
-    def __init__(self, dim, dim_out, noise_level_emb_dim=None, dropout=0,
+    def __init__(self, dim, dim_out, noise_level_emb_dim=None, dropout=0.0,
                  num_heads=1, use_affine_level=False, norm_groups=32, att=True):
         super().__init__()
         self.noise_func = FeatureWiseAffine(
@@ -151,7 +152,7 @@ class ResBlock(nn.Module):
 
 class UNet(nn.Module):
     def __init__(self, in_channel=6, out_channel=3, inner_channel=32, norm_groups=32,
-                 channel_mults=[1, 2, 4, 8, 8], res_blocks=3, dropout=0, img_size=128):
+                 channel_mults=(1, 2, 4, 8, 8), res_blocks=3, dropout=0.0, img_size=128):
         super().__init__()
 
         noise_level_channel = inner_channel
@@ -397,7 +398,7 @@ class SR3:
     def __init__(self, device, img_size, LR_size, loss_type, dataloader, testloader,
                  schedule_opt, save_path, load_path=None, load=False,
                  in_channel=6, out_channel=3, inner_channel=32, norm_groups=8,
-                 channel_mults=(1, 2, 4, 8, 8), res_blocks=3, dropout=0, lr=1e-5, distributed=False):
+                 channel_mults=(1, 2, 4, 8, 8), res_blocks=3, dropout=0.0, lr=1e-5, distributed=False):
         super(SR3, self).__init__()
         self.dataloader = dataloader
         self.testloader = testloader
@@ -532,6 +533,8 @@ if __name__ == "__main__":
     img_size = 256
     root = '/home/asebaq/Desktop/healthy_aug_22_good'
     testroot = '/home/asebaq/Desktop/healthy_aug_22_good_test'
+    # Seed
+    seed_everything()
 
     transforms_ = transforms.Compose([transforms.Resize(img_size), transforms.ToTensor(),
                                       transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
