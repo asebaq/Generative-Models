@@ -238,7 +238,7 @@ class Diffusion(nn.Module):
         # Coefficient for reverse diffusion posterior q(x_{t-1} | x_t, x_0)
         variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
         self.register_buffer('variance', to_torch(variance))
-        # below: log calculation clipped because the posterior variance is 0 at the beginning of the diffusion chain
+        # below: log.py calculation clipped because the posterior variance is 0 at the beginning of the diffusion chain
         self.register_buffer('posterior_log_variance_clipped', to_torch(np.log(np.maximum(variance, 1e-20))))
         self.register_buffer('posterior_mean_coef1',
                              to_torch(betas * np.sqrt(alphas_cumprod_prev) / (1. - alphas_cumprod)))
@@ -249,7 +249,7 @@ class Diffusion(nn.Module):
     def predict_start(self, x_t, t, noise):
         return self.pred_coef1[t] * x_t - self.pred_coef2[t] * noise
 
-    # Compute mean and log variance of posterior(reverse diffusion process) distribution
+    # Compute mean and log.py variance of posterior(reverse diffusion process) distribution
     def q_posterior(self, x_start, x_t, t):
         posterior_mean = self.posterior_mean_coef1[t] * x_start + self.posterior_mean_coef2[t] * x_t
         posterior_log_variance_clipped = self.posterior_log_variance_clipped[t]
@@ -269,7 +269,7 @@ class Diffusion(nn.Module):
         return mean, posterior_log_variance
 
     # Progress single step of reverse diffusion process
-    # Given mean and log variance of posterior, sample reverse diffusion result from the posterior
+    # Given mean and log.py variance of posterior, sample reverse diffusion result from the posterior
     @torch.no_grad()
     def p_sample(self, x, t, clip_denoised=True):
         mean, log_variance = self.p_mean_variance(x=x, t=t, clip_denoised=clip_denoised)

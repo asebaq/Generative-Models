@@ -30,7 +30,7 @@ class ActNorm(nn.Module):
             self.init.fill_(1)
         
         _, _, h, w = x.shape
-        # Log determinant is h*w*sum(log|s|)
+        # Log determinant is h*w*sum(log.py|s|)
         logdet = h * w * torch.sum(torch.log(torch.abs(self.scale)))
         return self.scale * (x + self.bias), logdet
 
@@ -66,7 +66,7 @@ class Inv1x1(nn.Module):
         _, _, h, w = x.shape
         weight = self.get_weight()
         weight = rearrange(weight, "w1 w2 -> w1 w2 1 1")
-        # Log determinant is h*w*sum(log|s|)
+        # Log determinant is h*w*sum(log.py|s|)
         logdet = h * w * torch.sum(self.log_s)
         return F.conv2d(x, weight), logdet
 
@@ -102,7 +102,7 @@ class AffineCoupling(nn.Module):
         log_s, bias = self.net(x_b).chunk(2, 1)
         # Followed the openai's implementation which used sigmoid instead of exp(log_s)
         scale = torch.sigmoid(log_s + 2)
-        # Log determinant is sum(log|s|)
+        # Log determinant is sum(log.py|s|)
         logdet = torch.log(scale).view(x.shape[0], -1).sum(-1)
         return torch.cat([scale * (x_a + bias), x_b], 1), logdet
 
@@ -153,7 +153,7 @@ class Flow_Block(nn.Module):
         else:
             self.prior = ZeroConv(in_channel * 4, in_channel * 8)
 
-    # Compute the log likelihood of latent z for forward process
+    # Compute the log.py likelihood of latent z for forward process
     def gaussian_log_p(self, x, mean, log_std):
         return -0.5 * np.log(2 * pi) - log_std - 0.5 * (x - mean) ** 2 / torch.exp(2 * log_std)
 

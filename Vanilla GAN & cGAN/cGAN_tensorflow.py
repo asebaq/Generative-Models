@@ -64,9 +64,9 @@ def Train(epoch, dim_latent, dataloader, G, D, optimizer_G, optimizer_D, verbose
                 fake_pred = D((gen_imgs, labels), training=True)
 
                 # Compute loss for generator & discriminator respectively
-                # Loss_G = E[log(D(G(z))]
+                # Loss_G = E[log.py(D(G(z))]
                 loss_G = -tf.math.reduce_mean(tf.math.log(fake_pred),0)
-                # Loss_D = E[log(D(x))]+E[log(1-D(G(z)))] 
+                # Loss_D = E[log.py(D(x))]+E[log.py(1-D(G(z)))]
                 loss_D = -tf.math.reduce_mean(tf.math.log(real_pred)+tf.math.log(1-fake_pred),0)
 
             grad_D = disc_tape.gradient(loss_D, D.trainable_variables)

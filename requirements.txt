@@ -12,3 +12,4 @@ jupyter
 tensorboard
 opencv-python
 tensorflow
+torchmetrics[image]

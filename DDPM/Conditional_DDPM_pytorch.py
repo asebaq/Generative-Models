@@ -1,4 +1,5 @@
 import math
+import os
 from functools import partial
 
 import matplotlib
@@ -17,7 +18,14 @@ from torch.utils.data import DataLoader
 # from tqdm.notebook import tqdm
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
+from torchmetrics.image.fid import FrechetInceptionDistance
+from shutil import copyfile
+import sys
+
+sys.path.append('..')
 from utils.seed_everything import seed_everything
+from utils import log
+
 
 class EMA:
     def __init__(self, beta):
@@ -284,7 +292,7 @@ class Diffusion(nn.Module):
         # Coefficient for reverse diffusion posterior q(x_{t-1} | x_t, x_0)
         variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
         self.register_buffer('variance', to_torch(variance))
-        # below: log calculation clipped because the posterior variance is 0 at the beginning of the diffusion chain
+        # below: log.py calculation clipped because the posterior variance is 0 at the beginning of the diffusion chain
         self.register_buffer('posterior_log_variance_clipped', to_torch(np.log(np.maximum(variance, 1e-20))))
         self.register_buffer('posterior_mean_coef1',
                              to_torch(betas * np.sqrt(alphas_cumprod_prev) / (1. - alphas_cumprod)))
@@ -295,7 +303,7 @@ class Diffusion(nn.Module):
     def predict_start(self, x_t, t, noise):
         return self.pred_coef1[t] * x_t - self.pred_coef2[t] * noise
 
-    # Compute mean and log variance of posterior(reverse diffusion process) distribution
+    # Compute mean and log.py variance of posterior(reverse diffusion process) distribution
     def q_posterior(self, x_start, x_t, t):
         posterior_mean = self.posterior_mean_coef1[t] * x_start + self.posterior_mean_coef2[t] * x_t
         posterior_log_variance_clipped = self.posterior_log_variance_clipped[t]
@@ -321,7 +329,7 @@ class Diffusion(nn.Module):
         return mean, posterior_log_variance
 
     # Progress single step of reverse diffusion process
-    # Given mean and log variance of posterior, sample reverse diffusion result from the posterior
+    # Given mean and log.py variance of posterior, sample reverse diffusion result from the posterior
     @torch.no_grad()
     def p_sample(self, x, t, lbl, clip_denoised=True):
         mean, log_variance = self.p_mean_variance(x=x, t=t, lbl=lbl, clip_denoised=clip_denoised)
@@ -391,7 +399,8 @@ class DDPM:
         self.train_loss = 0
 
         params = sum(p.numel() for p in self.ddpm.parameters())
-        print(f'Number of model parameters : {params}')
+        # print(f'Number of model parameters : {params}')
+        logger.info(f'Number of model parameters : {params}')
 
         if load:
             self.load(load_path)
@@ -411,14 +420,14 @@ class DDPM:
             init.constant_(m.bias.data, 0.0)
 
     def train(self, epoch, verbose):
-        fixed_noise = torch.randn(4, self.in_channel, self.img_size, self.img_size).to(self.device)
-        fixed_lbl = torch.randint(0, 2, (4,)).to(self.device)
-        writer = SummaryWriter()
+        fixed_noise = torch.randn(16, self.in_channel, self.img_size, self.img_size).to(self.device)
+        fixed_lbl = torch.randint(0, 10, (16,)).to(self.device)
         ema = EMA(0.995)
         ema_model = copy.deepcopy(self.ddpm).eval().requires_grad_(False)
+        fid = FrechetInceptionDistance(feature=64, normalize=True)
 
         for i in range(self.current_epoch, epoch):
-            print('Epoch:', i + 1, '/', epoch)
+            logger.info(f'Epoch: {i + 1}/{epoch}')
             self.train_loss = 0
             for _, (imgs, lbls) in enumerate(tqdm(self.dataloader)):
                 imgs = imgs.to(self.device)
@@ -435,26 +444,40 @@ class DDPM:
                 ema.step_ema(ema_model, self.ddpm)
                 self.train_loss += loss.item() * b
             self.current_epoch += 1
+            current_loss = self.train_loss / len(self.dataloader)
+            logger.info(f'Epoch: {i + 1} / loss:{current_loss:.3f}')
+
             if (i + 1) % verbose == 0:
-                print(f'Epoch: {i + 1} / loss:{self.train_loss / len(self.dataloader):.3f}')
+                real_imgs, _ = next(iter(self.dataloader))
+                fid.update(real_imgs, real=True)
 
                 # Save example of test images to check training
                 gen_imgs = self.test(self.ddpm, fixed_noise, fixed_lbl)
+                fid.update(gen_imgs.detach().cpu(), real=False)
                 gen_imgs = np.transpose(torchvision.utils.make_grid(
-                    gen_imgs.detach().cpu(), nrow=2, padding=2, normalize=True), (1, 2, 0))
-                matplotlib.image.imsave('Generated_Images_CFG.jpg', gen_imgs.numpy())
+                    gen_imgs.detach().cpu(), nrow=4, padding=2, normalize=True), (1, 2, 0))
+                matplotlib.image.imsave(os.path.join('/'.join(self.save_path.split('/')[:-1]),
+                                                     f'generated_images_c_ddpm_cfg_{self.current_epoch}.jpg'),
+                                        gen_imgs.numpy())
+                logger.info(f'FID: {fid.compute().item()}')
+                writer.add_scalar('FID/CFG Model', fid.compute().item(), self.current_epoch)
 
                 # Save example of test images to check training
                 gen_imgs = self.test(ema_model, fixed_noise, fixed_lbl)
+                fid.update(gen_imgs.detach().cpu(), real=False)
                 gen_imgs = np.transpose(torchvision.utils.make_grid(
-                    gen_imgs.detach().cpu(), nrow=2, padding=2, normalize=True), (1, 2, 0))
-                matplotlib.image.imsave('Generated_Images_EMA_CFG.jpg', gen_imgs.numpy())
+                    gen_imgs.detach().cpu(), nrow=4, padding=2, normalize=True), (1, 2, 0))
+                matplotlib.image.imsave(os.path.join('/'.join(self.save_path.split('/')[:-1]),
+                                                     f'generated_images_c_ddpm_cfg_ema_{self.current_epoch}.jpg'),
+                                        gen_imgs.numpy())
+                logger.info(f'EMA FID: {fid.compute().item()}')
+                writer.add_scalar('FID/EMA CFG Model', fid.compute().item(), self.current_epoch)
 
                 # Save model weight
                 self.save(self.save_path, self.ddpm)
                 self.save(self.save_path.replace('.ckpt', '_ema.ckpt'), ema_model)
                 writer.add_scalar('Epoch', self.current_epoch, self.current_epoch)
-                writer.add_scalar('Loss/train', self.train_loss / len(self.dataloader), self.current_epoch)
+                writer.add_scalar('Loss/train', current_loss, self.current_epoch)
 
     def test(self, model, imgs, lbls):
         model.eval()
@@ -472,7 +495,6 @@ class DDPM:
         state_dict = network.state_dict()
         for key, param in state_dict.items():
             state_dict[key] = param.cpu()
-        # torch.save(state_dict, save_path)
         torch.save({
             'epoch': self.current_epoch,
             'model_state_dict': state_dict,
@@ -489,18 +511,23 @@ class DDPM:
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.current_epoch = checkpoint['epoch']
         self.train_loss = checkpoint['loss']
-        print('Model loaded successfully')
+        logger.info('Model loaded successfully')
 
 
 if __name__ == '__main__':
-    batch_size = 8
+    batch_size = 16
     img_size = 64
     # root = '/home/asebaq/CholecT50_sample/data/images'
     # root = '/home/asebaq/SAC/healthy_aug_22_good'
     root = '/home/asebaq/Downloads/cifar-10-python/cifar-10-batches-py/cifar10-64/data'
+    log_dir = './logs/exp_cifar10_ema_cfg'
+    os.makedirs(log_dir, exist_ok=True)
+    copyfile(os.path.realpath(__file__), os.path.join(log_dir, os.path.realpath(__file__).split('/')[-1]))
+    logger = log.setup_custom_logger(log_dir, 'root')
+    logger.debug('main')
     # Seed
     seed_everything()
-
+    writer = SummaryWriter(os.path.join(log_dir, 'runs'))
     transforms_ = transforms.Compose([transforms.Resize(img_size), transforms.ToTensor(),
                                       transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
 
@@ -512,8 +539,9 @@ if __name__ == '__main__':
     schedule_opt = {'schedule': 'linear', 'n_timestep': 1000, 'linear_start': 1e-4, 'linear_end': 0.05}
 
     ddpm = DDPM(device, dataloader=dataloader, schedule_opt=schedule_opt,
-                save_path='c_cfg_ddpm.ckpt', load_path='c_cfg_ddpm.ckpt', load=False, img_size=img_size,
+                save_path=os.path.join(log_dir, 'c_cfg_ddpm.ckpt'), load_path=os.path.join(log_dir, 'c_cfg_ddpm.ckpt'),
+                load=True, img_size=img_size,
                 inner_channel=128,
                 norm_groups=32, channel_mults=[1, 2, 2, 2], res_blocks=2, dropout=0.2, lr=5 * 1e-5, num_classes=10,
                 distributed=False)
-    ddpm.train(epoch=1000, verbose=1)
+    ddpm.train(epoch=1000, verbose=5)
