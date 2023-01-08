@@ -20,6 +20,7 @@ def seed_tf(seed=DEFAULT_RANDOM_SEED):
 def seed_torch(seed=DEFAULT_RANDOM_SEED):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 

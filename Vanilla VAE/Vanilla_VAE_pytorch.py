@@ -8,7 +8,7 @@ import matplotlib
 
 
 class VAE(nn.Module):
-    def __init__(self, img_size, dims=[400,200], dim_latent=20):
+    def __init__(self, img_size, dims=(400, 200), dim_latent=20):
         super(VAE, self).__init__()
         self.img_size = int(np.prod(img_size))
 
@@ -19,8 +19,8 @@ class VAE(nn.Module):
 
         encoder_block = []
         encoder_block += block(self.img_size, dims[0])
-        for i in range(len(dims)-1):
-            encoder_block += block(dims[i], dims[i+1])
+        for i in range(len(dims) - 1):
+            encoder_block += block(dims[i], dims[i + 1])
         encoder_block += [nn.Linear(dims[-1], 2 * dim_latent)]
         encoder_block = np.reshape(encoder_block, -1).tolist()
         self.encoder_block = nn.Sequential(*encoder_block)
@@ -28,8 +28,8 @@ class VAE(nn.Module):
         dims.reverse()
         decoder_block = []
         decoder_block += block(dim_latent, dims[0])
-        for i in range(len(dims)-1):
-            decoder_block += block(dims[i], dims[i+1])
+        for i in range(len(dims) - 1):
+            decoder_block += block(dims[i], dims[i + 1])
         decoder_block += [nn.Linear(dims[-1], self.img_size)]
         decoder_block = np.reshape(decoder_block, -1).tolist()
         self.decoder_block = nn.Sequential(*decoder_block)
@@ -40,9 +40,9 @@ class VAE(nn.Module):
         return mu, logvar
 
     def reparameterize(self, mu, logvar):
-        std = torch.exp(0.5*logvar)
+        std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
-        return mu + eps*std
+        return mu + eps * std
 
     def decoder(self, z):
         z = self.decoder_block(z)
@@ -58,9 +58,9 @@ def Train(epoch, dataloader, device, VAE, img_size, optimizer, verbose):
     fixed_imgs, _ = next(iter(dataloader))
     fixed_imgs = fixed_imgs.to(device)
     temp = fixed_imgs
-    temp = np.transpose(torchvision.utils.make_grid(temp.cpu(), padding=2, normalize=True),(1,2,0))
+    temp = np.transpose(torchvision.utils.make_grid(temp.cpu(), padding=2, normalize=True), (1, 2, 0))
     matplotlib.image.imsave('Input_Images.jpg', temp.numpy())
-    
+
     for j in tqdm(range(epoch)):
         VAE.train()
         for _, (imgs, _) in enumerate(dataloader):
@@ -79,12 +79,12 @@ def Train(epoch, dataloader, device, VAE, img_size, optimizer, verbose):
             loss.backward()
             optimizer.step()
 
-        if (j+1) % verbose == 0:
-            print(f"Epoch {j+1} / Loss: {loss.item():.4f}")
+        if (j + 1) % verbose == 0:
+            print(f"Epoch {j + 1} / Loss: {loss.item():.4f}")
             # Evaluate result of VAE
             VAE.eval()
             recon_imgs, _, _ = VAE(fixed_imgs)
             recon_imgs = recon_imgs.view(fixed_imgs.size(0), *img_size)
             recon_imgs = np.transpose(torchvision.utils.make_grid(
-                                        recon_imgs.detach().cpu(), padding=2, normalize=True),(1,2,0))
+                recon_imgs.detach().cpu(), padding=2, normalize=True), (1, 2, 0))
             matplotlib.image.imsave('Reconstructed_Images.jpg', recon_imgs.numpy())

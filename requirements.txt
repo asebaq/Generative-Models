@@ -13,3 +13,7 @@ tensorboard
 opencv-python
 tensorflow
 torchmetrics[image]
+torchsummary
+pandas
+transformers
+pytorch-transformers

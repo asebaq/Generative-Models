@@ -130,6 +130,7 @@ class UNet(nn.Module):
         super().__init__()
         self.device = device
         self.time_dim = time_dim
+
         self.inc = DoubleConv(c_in, 64)
         self.down1 = Down(64, 128)
         self.sa1 = SelfAttention(128, 32)
@@ -234,8 +235,10 @@ class UNet_conditional(nn.Module):
         x1 = self.inc(x)
         x2 = self.down1(x1, t)
         x2 = self.sa1(x2)
+
         x3 = self.down2(x2, t)
         x3 = self.sa2(x3)
+
         x4 = self.down3(x3, t)
         x4 = self.sa3(x4)
 
@@ -245,10 +248,13 @@ class UNet_conditional(nn.Module):
 
         x = self.up1(x4, x3, t)
         x = self.sa4(x)
+
         x = self.up2(x, x2, t)
         x = self.sa5(x)
+
         x = self.up3(x, x1, t)
         x = self.sa6(x)
+
         output = self.outc(x)
         return output
 

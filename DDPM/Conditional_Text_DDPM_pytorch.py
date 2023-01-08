@@ -12,11 +12,16 @@ import torch.nn.functional as F
 import torchvision
 import torchvision.transforms as transforms
 from einops import rearrange
+from einops.layers.torch import Rearrange
+
 from torch import nn
 from torch.nn import init
 from torch.utils.data import DataLoader
+from PIL import Image
+from transformers import BertTokenizer, BertModel
 # from tqdm.notebook import tqdm
 from tqdm import tqdm
+import pandas as pd
 from torch.utils.tensorboard import SummaryWriter
 from torchmetrics.image.fid import FrechetInceptionDistance
 from shutil import copyfile
@@ -154,10 +159,12 @@ class ResBlock(nn.Module):
 
 class UNet(nn.Module):
     def __init__(self, in_channel=3, out_channel=3, inner_channel=32, norm_groups=32,
-                 channel_mults=(1, 2, 4, 8, 8), res_blocks=3, img_size=128, dropout=0.0, num_classes=None):
+                 channel_mults=(1, 2, 4, 8, 8), res_blocks=3, img_size=128, dropout=0.0,
+                 text_embed_dim=768, max_text_len=256, text=None):
         super().__init__()
 
         noise_level_channel = inner_channel
+        self.max_text_len = max_text_len
         self.time_embed = nn.Sequential(
             TimeEmbed(inner_channel),
             nn.Linear(inner_channel, inner_channel * 4),
@@ -210,15 +217,24 @@ class UNet(nn.Module):
 
         self.final_conv = Block(pre_channel, out_channel, groups=norm_groups)
 
-        if num_classes is not None:
-            self.lbl_emb = nn.Embedding(num_classes, inner_channel)
+        if text is not None:
+            self.txt_emb = nn.Linear(text_embed_dim, inner_channel)
 
     def forward(self, x, t, y):
         # Embedding of time step with noise coefficient alpha
         t = self.time_embed(t)
 
         if y is not None:
-            t += torch.unsqueeze(self.lbl_emb(y), 1)
+            text_tokens = self.txt_emb(y)
+            text_tokens = text_tokens[:, :self.max_text_len]
+
+            text_tokens_len = text_tokens.shape[1]
+            remainder = self.max_text_len - text_tokens_len
+            if remainder > 0:
+                text_tokens = F.pad(text_tokens, (0, 0, 0, remainder))
+
+            text_tokens = text_tokens.mean(dim=1)
+            t += torch.unsqueeze(text_tokens, dim=1)
 
         feats = []
         for layer in self.downs:
@@ -313,13 +329,10 @@ class Diffusion(nn.Module):
     # Note that posterior q for reverse diffusion process is conditioned Gaussian distribution q(x_{t-1}|x_t, x_0)
     # Thus to compute desired posterior q, we need original image x_0 in ideal, 
     # but it's impossible for actual training procedure -> Thus we reconstruct desired x_0 and use this for posterior
-    def p_mean_variance(self, x, t, lbl, clip_denoised: bool, cfg_scale=3):
+    def p_mean_variance(self, x, t, lbl, clip_denoised: bool):
         batch_size = x.shape[0]
 
         pred_noise = self.model(x, torch.full((batch_size, 1), t, device=x.device), lbl)
-        if cfg_scale > 0:
-            uncond_pred_noise = self.model(x, torch.full((batch_size, 1), t, device=x.device), None)
-            pred_noise = torch.lerp(uncond_pred_noise, pred_noise, cfg_scale)
 
         x_recon = self.predict_start(x, t, pred_noise)
 
@@ -346,7 +359,7 @@ class Diffusion(nn.Module):
         return img
 
     # Compute loss to train the model
-    def p_losses(self, x_start, lbl, cfg_scale=3):
+    def p_losses(self, x_start, txt):
         b, c, h, w = x_start.shape
         t = np.random.randint(1, self.num_timesteps + 1)
         sqrt_alpha = torch.FloatTensor(
@@ -358,11 +371,7 @@ class Diffusion(nn.Module):
         # Perturbed image obtained by forward diffusion process at random time step t
         x_noisy = sqrt_alpha * x_start + (1 - sqrt_alpha ** 2).sqrt() * noise
         # The model predict actual noise added at time step t
-        pred_noise = self.model(x_noisy, torch.full((b, 1), t, device=x_start.device), lbl)
-
-        # if cfg_scale > 0:
-        #     uncond_pred_noise = self.model(x_noisy, torch.full((batch_size, 1), t, device=x_noisy.device), None)
-        #     pred_noise = torch.lerp(uncond_pred_noise, pred_noise, cfg_scale)
+        pred_noise = self.model(x_noisy, torch.full((b, 1), t, device=x_start.device), txt)
 
         return self.loss_func(noise, pred_noise)
 
@@ -370,12 +379,59 @@ class Diffusion(nn.Module):
         return self.p_losses(x, lbl, *args, **kwargs)
 
 
+class SatDataset(torch.utils.data.Dataset):
+    def __init__(self, df, root, split='train'):
+        self.df = df[df['split'] == split].reset_index(drop=True)
+        self.root = root
+        self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+        self.model = BertModel.from_pretrained('bert-base-uncased',
+                                               output_hidden_states=True,
+                                               )
+        self.transforms_ = transforms.Compose([transforms.Resize(img_size), transforms.ToTensor(),
+                                               transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
+
+    def __len__(self):
+        return len(self.df)
+
+    def embed_text(self, text):
+        marked_text = "[CLS] " + text + " [SEP]"
+        tokenized_text = self.tokenizer.tokenize(marked_text)
+        indexed_tokens = self.tokenizer.convert_tokens_to_ids(tokenized_text)
+        segments_ids = [1] * len(tokenized_text)
+        tokens_tensor = torch.tensor([indexed_tokens])
+        segments_tensors = torch.tensor([segments_ids])
+        with torch.no_grad():
+            outputs = self.model(tokens_tensor, segments_tensors)
+            hidden_states = outputs[2]
+        token_embeddings = torch.stack(hidden_states, dim=0)
+        token_embeddings = torch.squeeze(token_embeddings, dim=1)
+        token_embeddings_sum = torch.zeros((token_embeddings.shape[0], token_embeddings.shape[-1]))
+        for i in range(token_embeddings.shape[0]):
+            token_embeddings_sum[i] = torch.sum(token_embeddings[i, -4:], dim=0)
+        return token_embeddings_sum
+
+    def __getitem__(self, idx):
+        # Read image
+        img_path = os.path.join(self.root, self.df.filename[idx])
+        img = Image.open(img_path)
+        img = self.transforms_(img)
+
+        txt = self.df.sent1[idx]
+        tokens = self.embed_text(txt)
+
+        data = dict()
+        data['image'] = img
+        data['txt'] = txt
+        data['tokens'] = tokens
+        return data
+
+
 # Class to train & test desired model
 class DDPM:
     def __init__(self, device, dataloader, schedule_opt, save_path,
                  load_path=None, load=False, in_channel=3, out_channel=3, inner_channel=32,
                  norm_groups=16, channel_mults=(1, 2, 4, 8, 8), res_blocks=3, dropout=0.0,
-                 img_size=64, lr=1e-4, num_classes=2, distributed=False):
+                 img_size=64, lr=1e-4, distributed=False):
         super(DDPM, self).__init__()
         self.dataloader = dataloader
         self.device = device
@@ -383,8 +439,7 @@ class DDPM:
         self.in_channel = in_channel
         self.img_size = img_size
 
-        model = UNet(in_channel, out_channel, inner_channel, norm_groups, channel_mults, res_blocks, img_size,
-                     num_classes=num_classes)
+        model = UNet(in_channel, out_channel, inner_channel, norm_groups, channel_mults, res_blocks, img_size, text=True)
         self.ddpm = Diffusion(model, device, out_channel)
 
         # Apply weight initialization & set loss & set noise schedule
@@ -422,7 +477,6 @@ class DDPM:
 
     def train(self, epoch, verbose):
         fixed_noise = torch.randn(16, self.in_channel, self.img_size, self.img_size).to(self.device)
-        fixed_lbl = torch.randint(0, 10, (16,)).to(self.device)
         ema = EMA(0.995)
         ema_model = copy.deepcopy(self.ddpm).eval().requires_grad_(False)
         fid = FrechetInceptionDistance(feature=64, normalize=True)
@@ -430,15 +484,13 @@ class DDPM:
         for i in range(self.current_epoch, epoch):
             logger.info(f'Epoch: {i + 1}/{epoch}')
             self.train_loss = 0
-            for _, (imgs, lbls) in enumerate(tqdm(self.dataloader)):
-                imgs = imgs.to(self.device)
-                lbls = lbls.to(self.device)
+            for _, data in enumerate(tqdm(self.dataloader)):
+                imgs = data['image'].to(self.device)
+                tokens = data['tokens'].to(self.device)
                 b, c, h, w = imgs.shape
 
                 self.optimizer.zero_grad()
-                if np.random.random() > 0.1:
-                    lbls = None
-                loss = self.ddpm(imgs, lbls)
+                loss = self.ddpm(imgs, tokens)
                 loss = loss.sum() / int(b * c * h * w)
                 loss.backward()
                 self.optimizer.step()
@@ -449,30 +501,32 @@ class DDPM:
             logger.info(f'Epoch: {i + 1} / loss:{current_loss:.3f}')
 
             if (i + 1) % verbose == 0:
-                real_imgs, _ = next(iter(self.dataloader))
+                data = next(iter(self.dataloader))
+                real_imgs = data['image']
+                tokens = data['tokens'].to(self.device)
                 fid.update(real_imgs, real=True)
 
                 # Save example of test images to check training
-                gen_imgs = self.test(self.ddpm, fixed_noise, fixed_lbl)
+                gen_imgs = self.test(self.ddpm, fixed_noise, tokens)
                 fid.update(gen_imgs.detach().cpu(), real=False)
                 gen_imgs = np.transpose(torchvision.utils.make_grid(
                     gen_imgs.detach().cpu(), nrow=4, padding=2, normalize=True), (1, 2, 0))
                 matplotlib.image.imsave(os.path.join('/'.join(self.save_path.split('/')[:-1]),
-                                                     f'generated_images_c_ddpm_cfg_{self.current_epoch}.jpg'),
+                                                     f'generated_images_c_txt_ddpm_{self.current_epoch}.jpg'),
                                         gen_imgs.numpy())
                 logger.info(f'FID: {fid.compute().item()}')
-                writer.add_scalar('FID/CFG Model', fid.compute().item(), self.current_epoch)
+                writer.add_scalar('FID/Model', fid.compute().item(), self.current_epoch)
 
                 # Save example of test images to check training
-                gen_imgs = self.test(ema_model, fixed_noise, fixed_lbl)
+                gen_imgs = self.test(ema_model, fixed_noise, tokens)
                 fid.update(gen_imgs.detach().cpu(), real=False)
                 gen_imgs = np.transpose(torchvision.utils.make_grid(
                     gen_imgs.detach().cpu(), nrow=4, padding=2, normalize=True), (1, 2, 0))
                 matplotlib.image.imsave(os.path.join('/'.join(self.save_path.split('/')[:-1]),
-                                                     f'generated_images_c_ddpm_cfg_ema_{self.current_epoch}.jpg'),
+                                                     f'generated_images_c_txt_ddpm_ema_{self.current_epoch}.jpg'),
                                         gen_imgs.numpy())
                 logger.info(f'EMA FID: {fid.compute().item()}')
-                writer.add_scalar('FID/EMA CFG Model', fid.compute().item(), self.current_epoch)
+                writer.add_scalar('FID/EMA Model', fid.compute().item(), self.current_epoch)
 
                 # Save model weight
                 self.save(self.save_path, self.ddpm)
@@ -480,13 +534,13 @@ class DDPM:
                 writer.add_scalar('Epoch', self.current_epoch, self.current_epoch)
                 writer.add_scalar('Loss/train', current_loss, self.current_epoch)
 
-    def test(self, model, imgs, lbls):
+    def test(self, model, imgs, txt):
         model.eval()
         with torch.no_grad():
             if isinstance(model, nn.DataParallel):
-                gen_imgs = model.module.generate(imgs, lbls)
+                gen_imgs = model.module.generate(imgs, txt)
             else:
-                gen_imgs = model.generate(imgs, lbls)
+                gen_imgs = model.generate(imgs, txt)
         model.train()
         return gen_imgs
 
@@ -527,10 +581,8 @@ class DDPM:
 if __name__ == '__main__':
     batch_size = 16
     img_size = 64
-    # root = '/home/asebaq/CholecT50_sample/data/images'
-    # root = '/home/asebaq/SAC/healthy_aug_22_good'
-    root = '/home/asebaq/Downloads/cifar-10-python/cifar-10-batches-py/cifar10-64/data'
-    log_dir = './logs/exp_cifar10_ema_cfg'
+    root = '/home/asebaq/RSICD_optimal'
+    log_dir = './logs/exp_text_ema'
     os.makedirs(log_dir, exist_ok=True)
     copyfile(os.path.realpath(__file__), os.path.join(log_dir, os.path.realpath(__file__).split('/')[-1]))
     logger = log.setup_custom_logger(log_dir, 'root')
@@ -538,10 +590,9 @@ if __name__ == '__main__':
     # Seed
     seed_everything()
     writer = SummaryWriter(os.path.join(log_dir, 'runs'))
-    transforms_ = transforms.Compose([transforms.Resize(img_size), transforms.ToTensor(),
-                                      transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
 
-    data = torchvision.datasets.ImageFolder(root, transform=transforms_)
+    df = pd.read_csv(os.path.join(root, 'dataset_rsicd.csv'))
+    data = SatDataset(df, os.path.join(root, 'RSICD_images'))
     dataloader = DataLoader(data, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
 
     cuda = torch.cuda.is_available()
@@ -549,9 +600,9 @@ if __name__ == '__main__':
     schedule_opt = {'schedule': 'linear', 'n_timestep': 1000, 'linear_start': 1e-4, 'linear_end': 0.05}
 
     ddpm = DDPM(device, dataloader=dataloader, schedule_opt=schedule_opt,
-                save_path=os.path.join(log_dir, 'c_cfg_ddpm.ckpt'), load_path=os.path.join(log_dir, 'c_cfg_ddpm.ckpt'),
-                load=True, img_size=img_size,
+                save_path=os.path.join(log_dir, 'c_txt_ddpm.ckpt'), load_path=os.path.join(log_dir, 'c_txt_ddpm.ckpt'),
+                load=False, img_size=img_size,
                 inner_channel=128,
-                norm_groups=32, channel_mults=[1, 2, 2, 2], res_blocks=2, dropout=0.2, lr=5 * 1e-5, num_classes=10,
+                norm_groups=32, channel_mults=[1, 2, 2, 2], res_blocks=2, dropout=0.2, lr=5 * 1e-5,
                 distributed=False)
     ddpm.train(epoch=1000, verbose=5)
