@@ -34,9 +34,9 @@ class TimeEmbed(nn.Module):
         return embed
 
 
-class Mish(nn.Module):
+class SiLU(nn.Module):
     def forward(self, x):
-        return x * torch.tanh(F.softplus(x))
+        return x * torch.sigmoid(x)
 
 
 class Upsample(nn.Module):
@@ -63,7 +63,7 @@ class Block(nn.Module):
         super().__init__()
         self.block = nn.Sequential(
             nn.GroupNorm(groups, dim),
-            Mish(),
+            SiLU(),
             nn.Dropout(dropout) if dropout != 0 else nn.Identity(),
             nn.Conv2d(dim, dim_out, 3, padding=1)
         )
@@ -99,7 +99,7 @@ class SelfAtt(nn.Module):
 class ResBlock(nn.Module):
     def __init__(self, dim, dim_out, time_emb_dim=None, norm_groups=32, num_heads=8, dropout=0.0, att=True):
         super().__init__()
-        self.mlp = nn.Sequential(Mish(), nn.Linear(time_emb_dim, dim_out))
+        self.mlp = nn.Sequential(SiLU(), nn.Linear(time_emb_dim, dim_out))
         self.block1 = Block(dim, dim_out, groups=norm_groups)
         self.block2 = Block(dim_out, dim_out, groups=norm_groups, dropout=dropout)
         self.res_conv = nn.Conv2d(dim, dim_out, 1) if dim != dim_out else nn.Identity()
@@ -125,7 +125,7 @@ class UNet(nn.Module):
         self.time_embed = nn.Sequential(
             TimeEmbed(inner_channel),
             nn.Linear(inner_channel, inner_channel * 4),
-            Mish(),
+            SiLU(),
             nn.Linear(inner_channel * 4, inner_channel)
         )
 
@@ -198,6 +198,17 @@ class UNet(nn.Module):
         return self.final_conv(x)
 
 
+def cosine_beta_schedule(timesteps):
+    betas = []
+    max_beta = 0.999
+    alpha_bar = lambda t: math.cos((t + 0.008) / 1.008 * math.pi / 2) ** 2
+    for i in range(timesteps):
+        t1 = i / timesteps
+        t2 = (i + 1) / timesteps
+        betas.append(min(1 - alpha_bar(t2) / alpha_bar(t1), max_beta))
+    return torch.tensor(betas)
+
+
 class Diffusion(nn.Module):
     def __init__(self, model, device, channels=3):
         super().__init__()
@@ -206,9 +217,14 @@ class Diffusion(nn.Module):
         self.device = device
         self.loss_func = nn.L1Loss(reduction='sum')
 
-    def make_beta_schedule(self, schedule, n_timestep, linear_start=1e-4, linear_end=2e-2):
+    def make_beta_schedule(self, schedule, n_timestep):
         if schedule == 'linear':
-            betas = np.linspace(linear_start, linear_end, n_timestep, dtype=np.float64)
+            scale = 1000 / n_timestep
+            beta_start = scale * 1e-4
+            beta_end = scale * 2e-2
+            betas = np.linspace(beta_start, beta_end, n_timestep, dtype=np.float64)
+        elif schedule == 'cosine':
+            betas = cosine_beta_schedule(n_timestep)
         else:
             raise NotImplementedError(schedule)
         return betas
@@ -218,13 +234,12 @@ class Diffusion(nn.Module):
 
         betas = self.make_beta_schedule(
             schedule=schedule_opt['schedule'],
-            n_timestep=schedule_opt['n_timestep'],
-            linear_start=schedule_opt['linear_start'],
-            linear_end=schedule_opt['linear_end'])
+            n_timestep=schedule_opt['n_timestep'])
         betas = betas.detach().cpu().numpy() if isinstance(betas, torch.Tensor) else betas
         alphas = 1. - betas
         alphas_cumprod = np.cumprod(alphas, axis=0)
         alphas_cumprod_prev = np.append(1., alphas_cumprod[:-1])
+
         self.sqrt_alphas_cumprod_prev = np.sqrt(np.append(1., alphas_cumprod))
 
         self.num_timesteps = int(len(betas))
@@ -233,12 +248,13 @@ class Diffusion(nn.Module):
         self.register_buffer('betas', to_torch(betas))
         self.register_buffer('alphas_cumprod', to_torch(alphas_cumprod))
         self.register_buffer('alphas_cumprod_prev', to_torch(alphas_cumprod_prev))
-        self.register_buffer('pred_coef1', to_torch(np.sqrt(1. / alphas_cumprod)))
-        self.register_buffer('pred_coef2', to_torch(np.sqrt(1. / alphas_cumprod - 1)))
+        self.register_buffer('log_one_minus_alphas_cumprod', to_torch(np.log(1.0 - alphas_cumprod)))
+        self.register_buffer('sqrt_recip_alphas_cumprod', to_torch(np.sqrt(1. / alphas_cumprod)))
+        self.register_buffer('sqrt_recipm1_alphas_cumprod', to_torch(np.sqrt(1. / alphas_cumprod - 1)))
 
         # Coefficient for reverse diffusion posterior q(x_{t-1} | x_t, x_0)
-        variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
-        self.register_buffer('variance', to_torch(variance))
+        # calculations for posterior q(x_{t-1} | x_t, x_0)
+        self.register_buffer('posterior_variance', to_torch(betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)))
         # below: log.py calculation clipped because the posterior variance is 0 at the beginning of the diffusion chain
         self.register_buffer('posterior_log_variance_clipped', to_torch(np.log(np.maximum(variance, 1e-20))))
         self.register_buffer('posterior_mean_coef1',
@@ -248,25 +264,33 @@ class Diffusion(nn.Module):
 
     # Predict desired image x_0 from x_t with noise z_t -> Output is predicted x_0
     def predict_start(self, x_t, t, noise):
-        return self.pred_coef1[t] * x_t - self.pred_coef2[t] * noise
+        # (1.0 / self.posterior_mean_coef1)*noise - self.posterior_mean_coef2 / self.posterior_mean_coef1*x_t
+        return self.sqrt_recip_alphas_cumprod[t] * x_t - self.sqrt_recipm1_alphas_cumprod[t] * noise
+
 
     # Compute mean and log.py variance of posterior(reverse diffusion process) distribution
-    def q_posterior(self, x_start, x_t, t):
+    def q_posterior_mean_variance(self, x_start, x_t, t):
         posterior_mean = self.posterior_mean_coef1[t] * x_start + self.posterior_mean_coef2[t] * x_t
+        posterior_variance = ''
         posterior_log_variance_clipped = self.posterior_log_variance_clipped[t]
         return posterior_mean, posterior_log_variance_clipped
 
     # Note that posterior q for reverse diffusion process is conditioned Gaussian distribution q(x_{t-1}|x_t, x_0)
     # Thus to compute desired posterior q, we need original image x_0 in ideal, 
     # but it's impossible for actual training procedure -> Thus we reconstruct desired x_0 and use this for posterior
-    def p_mean_variance(self, x, t, clip_denoised: bool, condition_x=None):
-        batch_size = x.shape[0]
-        x_recon = self.predict_start(x, t, noise=self.model(x, torch.full((batch_size, 1), t, device=x.device)))
+    def p_mean_variance(self, x, t, clip_denoised: bool):
+        batch_size, ch = x.shape[:2]
+
+        noise = self.model(x, torch.full((batch_size, 1), t, device=x.device))
+        model_mean, model_log_variance = torch.split(noise, ch, dim=1)
+        model_variance = torch.exp(model_log_variance)
+
+        x_recon = self.predict_start(x, t, noise)
 
         if clip_denoised:
             x_recon.clamp_(-1., 1.)
 
-        mean, posterior_log_variance = self.q_posterior(x_start=x_recon, x_t=x, t=t)
+        mean, posterior_log_variance = self.q_posterior_mean_variance(x_start=x_recon, x_t=x, t=t)
         return mean, posterior_log_variance
 
     # Progress single step of reverse diffusion process
@@ -309,7 +333,7 @@ class Diffusion(nn.Module):
 # Class to train & test desired model
 class DDPM:
     def __init__(self, device, dataloader, schedule_opt, save_path,
-                 load_path=None, load=False, in_channel=3, out_channel=3, inner_channel=32,
+                 load_path=None, load=False, in_channel=3, out_channel=6, inner_channel=32,
                  norm_groups=16, channel_mults=(1, 2, 4, 8, 8), res_blocks=3, dropout=0.0,
                  img_size=64, lr=1e-4, distributed=False):
         super(DDPM, self).__init__()
@@ -433,9 +457,10 @@ class DDPM:
         print('Model loaded successfully')
 
 
-def main():
+if __name__ == '__main__':
     batch_size = 12
     img_size = 64
+    # root = '/home/asebaq/CholecT50_sample/data/images'
     root = '/home/asebaq/SAC/healthy_aug_22_good'
     # Seed
     seed_everything()
@@ -448,31 +473,10 @@ def main():
 
     cuda = torch.cuda.is_available()
     device = torch.device('cuda' if cuda else 'cpu')
-    schedule_opt = {'schedule': 'linear', 'n_timestep': 1000, 'linear_start': 1e-4, 'linear_end': 0.05}
+    schedule_opt = {'schedule': 'linear', 'n_timestep': 1000}
 
     ddpm = DDPM(device, dataloader=dataloader, schedule_opt=schedule_opt,
                 save_path='ddpm.ckpt', load_path='ddpm.ckpt', load=True, img_size=img_size,
                 inner_channel=128,
                 norm_groups=32, channel_mults=[1, 2, 2, 2], res_blocks=2, dropout=0.2, lr=5 * 1e-5, distributed=False)
     ddpm.train(epoch=1000, verbose=1)
-
-
-if __name__ == '__main__':
-    # main()
-    # net = UNet() # 34,939,939 parameters
-    # net = UNet(channel_mults=(1, 2, 4, 8)) # 20,705,315 parameters
-    # net = UNet(res_blocks=0) # 4,877,923 parameters
-    # net = UNet(res_blocks=0, channel_mults=(1, 2, 4, 8)) # 2,678,275 parameters
-    # net = UNet(res_blocks=0, channel_mults=(1, 2, 4, 4)) # 1,345,539 parameters
-    # net = UNet(channel_mults = [1, 2, 2, 2], res_blocks = 2) # 2,315,715 parameters (org)
-    # net = UNet(channel_mults = [1, 2, 4, 8], res_blocks = 1) # 2,315,715 parameters
-    net = UNet(channel_mults=[1, 2, 2, 2], res_blocks=0) # 2,315,715 parameters
-
-    # print(net)
-    val = sum([p.numel() for p in net.parameters()])
-    print(f'{val:,} parameters')
-    x = torch.randn(3, 3, 64, 64)
-    t = torch.randn(3, 1)
-    print('image input shape =', x.shape)
-    print('timestep shape =', t.shape)
-    print('output shape =', net(x, t).shape)

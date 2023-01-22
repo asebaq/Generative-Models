@@ -27,10 +27,12 @@ from torchmetrics.image.fid import FrechetInceptionDistance
 from shutil import copyfile
 import sys
 import random
+import time
 
 sys.path.append('..')
 from utils.seed_everything import seed_everything
 from utils import log
+from torchmetrics.image.inception import InceptionScore
 
 
 class EMA:
@@ -264,9 +266,12 @@ class Diffusion(nn.Module):
         self.device = device
         self.loss_func = nn.L1Loss(reduction='sum')
 
-    def make_beta_schedule(self, schedule, n_timestep, linear_start=1e-4, linear_end=2e-2):
+    def make_beta_schedule(self, schedule, n_timestep):
         if schedule == 'linear':
-            betas = np.linspace(linear_start, linear_end, n_timestep, dtype=np.float64)
+            scale = 1000 / n_timestep
+            beta_start = scale * 1e-4
+            beta_end = scale * 2e-2
+            betas = np.linspace(beta_start, beta_end, n_timestep, dtype=np.float64)
         elif schedule == 'cosine':
             betas = self.cosine_beta_schedule(n_timestep)
         else:
@@ -288,9 +293,7 @@ class Diffusion(nn.Module):
 
         betas = self.make_beta_schedule(
             schedule=schedule_opt['schedule'],
-            n_timestep=schedule_opt['n_timestep'],
-            linear_start=schedule_opt['linear_start'],
-            linear_end=schedule_opt['linear_end'])
+            n_timestep=schedule_opt['n_timestep'])
         betas = betas.detach().cpu().numpy() if isinstance(betas, torch.Tensor) else betas
         alphas = 1. - betas
         alphas_cumprod = np.cumprod(alphas, axis=0)
@@ -327,12 +330,12 @@ class Diffusion(nn.Module):
         return posterior_mean, posterior_log_variance_clipped
 
     # Note that posterior q for reverse diffusion process is conditioned Gaussian distribution q(x_{t-1}|x_t, x_0)
-    # Thus to compute desired posterior q, we need original image x_0 in ideal, 
+    # Thus to compute desired posterior q, we need original image x_0 in ideal,
     # but it's impossible for actual training procedure -> Thus we reconstruct desired x_0 and use this for posterior
-    def p_mean_variance(self, x, t, lbl, clip_denoised: bool):
+    def p_mean_variance(self, x, t, txt, clip_denoised: bool):
         batch_size = x.shape[0]
 
-        pred_noise = self.model(x, torch.full((batch_size, 1), t, device=x.device), lbl)
+        pred_noise = self.model(x, torch.full((batch_size, 1), t, device=x.device), txt)
 
         x_recon = self.predict_start(x, t, pred_noise)
 
@@ -345,17 +348,17 @@ class Diffusion(nn.Module):
     # Progress single step of reverse diffusion process
     # Given mean and log.py variance of posterior, sample reverse diffusion result from the posterior
     @torch.no_grad()
-    def p_sample(self, x, t, lbl, clip_denoised=True):
-        mean, log_variance = self.p_mean_variance(x=x, t=t, lbl=lbl, clip_denoised=clip_denoised)
+    def p_sample(self, x, t, txt, clip_denoised=True):
+        mean, log_variance = self.p_mean_variance(x=x, t=t, txt=txt, clip_denoised=clip_denoised)
         noise = torch.randn_like(x) if t > 0 else torch.zeros_like(x)
         return mean + noise * (0.5 * log_variance).exp()
 
     # Progress whole reverse diffusion process
     @torch.no_grad()
-    def generate(self, x_in, lbl):
+    def generate(self, x_in, txt):
         img = torch.rand_like(x_in, device=x_in.device)
         for i in reversed(range(0, self.num_timesteps)):
-            img = self.p_sample(img, i, lbl)
+            img = self.p_sample(img, i, txt)
         return img
 
     # Compute loss to train the model
@@ -375,8 +378,8 @@ class Diffusion(nn.Module):
 
         return self.loss_func(noise, pred_noise)
 
-    def forward(self, x, lbl, *args, **kwargs):
-        return self.p_losses(x, lbl, *args, **kwargs)
+    def forward(self, x, txt, *args, **kwargs):
+        return self.p_losses(x, txt, *args, **kwargs)
 
 
 class SatDataset(torch.utils.data.Dataset):
@@ -387,8 +390,9 @@ class SatDataset(torch.utils.data.Dataset):
         self.model = BertModel.from_pretrained('bert-base-uncased',
                                                output_hidden_states=True,
                                                )
-        self.transforms_ = transforms.Compose([transforms.Resize(img_size), transforms.ToTensor(),
+        self.transforms_ = transforms.Compose([transforms.Resize(64), transforms.ToTensor(),
                                                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
+        self.transforms_ = transforms.Compose([transforms.Resize(64), transforms.ToTensor()])
 
     def __len__(self):
         return len(self.df)
@@ -439,7 +443,11 @@ class DDPM:
         self.in_channel = in_channel
         self.img_size = img_size
 
-        model = UNet(in_channel, out_channel, inner_channel, norm_groups, channel_mults, res_blocks, img_size, text=True)
+        model = UNet(in_channel, out_channel, inner_channel, norm_groups, channel_mults, res_blocks, img_size,
+                     text=True)
+
+        params = sum(p.numel() for p in model.parameters())
+        logger.info(f'Number of UNet model parameters : {params:,}')
         self.ddpm = Diffusion(model, device, out_channel)
 
         # Apply weight initialization & set loss & set noise schedule
@@ -456,7 +464,7 @@ class DDPM:
 
         params = sum(p.numel() for p in self.ddpm.parameters())
         # print(f'Number of model parameters : {params}')
-        logger.info(f'Number of model parameters : {params}')
+        logger.info(f'Number of DDPM model parameters : {params:,}')
 
         if load:
             self.load(load_path)
@@ -476,14 +484,15 @@ class DDPM:
             init.constant_(m.bias.data, 0.0)
 
     def train(self, epoch, verbose):
-        fixed_noise = torch.randn(16, self.in_channel, self.img_size, self.img_size).to(self.device)
         ema = EMA(0.995)
         ema_model = copy.deepcopy(self.ddpm).eval().requires_grad_(False)
         fid = FrechetInceptionDistance(feature=64, normalize=True)
+        inception = InceptionScore()
 
         for i in range(self.current_epoch, epoch):
             logger.info(f'Epoch: {i + 1}/{epoch}')
             self.train_loss = 0
+            start = time.time()
             for _, data in enumerate(tqdm(self.dataloader)):
                 imgs = data['image'].to(self.device)
                 tokens = data['tokens'].to(self.device)
@@ -494,39 +503,72 @@ class DDPM:
                 loss = loss.sum() / int(b * c * h * w)
                 loss.backward()
                 self.optimizer.step()
-                ema.step_ema(ema_model, self.ddpm)
+                ema.step_ema(ema_model, self.ddpm, 1)
                 self.train_loss += loss.item() * b
             self.current_epoch += 1
             current_loss = self.train_loss / len(self.dataloader)
-            logger.info(f'Epoch: {i + 1} / loss:{current_loss:.3f}')
+            logger.info(f'Epoch: {i + 1} / loss:{current_loss:.3f}, Time: {round(time.time() - start, 3)} sec')
 
             if (i + 1) % verbose == 0:
                 data = next(iter(self.dataloader))
-                real_imgs = data['image']
-                tokens = data['tokens'].to(self.device)
+                real_imgs = data['image'][0]
+                tokens = data['tokens'][0].to(self.device)
+                txt = data['txt'][0]
+
+                real_imgs = torch.unsqueeze(real_imgs, 0)
+                tokens = torch.unsqueeze(tokens, 0)
+
+                txt = txt.replace(' ', '_')[:-1]
+                image_save_path = os.path.join('/'.join(self.save_path.split('/')[:-1]), 'generated_images')
                 fid.update(real_imgs, real=True)
+                # inception.update(real_imgs)
 
                 # Save example of test images to check training
+                fixed_noise = torch.randn(1, self.in_channel, self.img_size, self.img_size).to(self.device)
+                start = time.time()
                 gen_imgs = self.test(self.ddpm, fixed_noise, tokens)
-                fid.update(gen_imgs.detach().cpu(), real=False)
+                gen_imgs = gen_imgs.detach().cpu()
+                print(gen_imgs.min())
+                print(gen_imgs.max())
+                print(torch.isnan(gen_imgs).sum())
+                print(torch.isinf(gen_imgs).sum())
+
+                logger.info(f'Inference time: {round(time.time() - start, 3)} sec')
+                fid.update(gen_imgs, real=False)
+                fid_val = fid.compute().item()
+
+                # inception.update(torch.unsqueeze(gen_imgs, 0).type(torch.uint8))
                 gen_imgs = np.transpose(torchvision.utils.make_grid(
-                    gen_imgs.detach().cpu(), nrow=4, padding=2, normalize=True), (1, 2, 0))
-                matplotlib.image.imsave(os.path.join('/'.join(self.save_path.split('/')[:-1]),
-                                                     f'generated_images_c_txt_ddpm_{self.current_epoch}.jpg'),
+                    gen_imgs, nrow=1, padding=2, normalize=True), (1, 2, 0))
+                matplotlib.image.imsave(os.path.join(image_save_path,
+                                                     f'{txt}_ddpm_{self.current_epoch}.jpg'),
                                         gen_imgs.numpy())
-                logger.info(f'FID: {fid.compute().item()}')
-                writer.add_scalar('FID/Model', fid.compute().item(), self.current_epoch)
+
+                logger.info(f'FID: {fid_val}')
+                # logger.info(f'Inception: {inception.compute().item()}')
+                writer.add_scalar('FID/Model', fid_val, self.current_epoch)
+                # writer.add_scalar('Inception/Model', inception.compute().item(), self.current_epoch)
 
                 # Save example of test images to check training
                 gen_imgs = self.test(ema_model, fixed_noise, tokens)
-                fid.update(gen_imgs.detach().cpu(), real=False)
+                gen_imgs = gen_imgs.detach().cpu()
+                print(torch.isnan(gen_imgs).sum())
+                print(torch.isinf(gen_imgs).sum())
+
+                fid.update(gen_imgs, real=False)
+                fid_val = fid.compute()
+                fid_val = fid_val.item()
+
+                # inception.update(torch.unsqueez(gen_imgs, 0))
                 gen_imgs = np.transpose(torchvision.utils.make_grid(
-                    gen_imgs.detach().cpu(), nrow=4, padding=2, normalize=True), (1, 2, 0))
-                matplotlib.image.imsave(os.path.join('/'.join(self.save_path.split('/')[:-1]),
-                                                     f'generated_images_c_txt_ddpm_ema_{self.current_epoch}.jpg'),
+                    gen_imgs, nrow=1, padding=2, normalize=True), (1, 2, 0))
+                matplotlib.image.imsave(os.path.join(image_save_path,
+                                                     f'{txt}_ddpm_ema_{self.current_epoch}.jpg'),
                                         gen_imgs.numpy())
-                logger.info(f'EMA FID: {fid.compute().item()}')
-                writer.add_scalar('FID/EMA Model', fid.compute().item(), self.current_epoch)
+                logger.info(f'EMA FID: {fid_val}')
+                # logger.info(f'EMA Inception: {inception.compute().item()}')
+                writer.add_scalar('FID/EMA Model', fid_val, self.current_epoch)
+                # writer.add_scalar('Inception/EMA Model', inception.compute().item(), self.current_epoch)
 
                 # Save model weight
                 self.save(self.save_path, self.ddpm)
@@ -562,11 +604,11 @@ class DDPM:
         }, save_path)
 
     def load(self, load_path):
-        network = self.ddpm
+        # network = self.ddpm
         checkpoint = torch.load(load_path)
         if isinstance(self.ddpm, nn.DataParallel):
-            network = network.module
-        network.load_state_dict(checkpoint['model_state_dict'])
+            self.ddpm = self.ddpm.module
+        self.ddpm.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.current_epoch = checkpoint['epoch']
         self.train_loss = checkpoint['loss']
@@ -579,11 +621,18 @@ class DDPM:
 
 
 if __name__ == '__main__':
-    batch_size = 16
+    unet = UNet(channel_mults=[1, 2, 4, 8], res_blocks=2, text=True)  # 2,315,715 parameters
+    # val = sum([p.numel() for p in unet.parameters()])
+    # print(f'unet {val:,} all parameters')
+    # val = sum([p.numel() for p in unet.parameters() if p.requires_grad])
+    # print(f'unet {val:,} trainable parameters')
+
+    batch_size = 2
     img_size = 64
     root = '/home/asebaq/RSICD_optimal'
-    log_dir = './logs/exp_text_ema'
+    log_dir = '/home/asebaq/Generative-Models/DDPM/logs/exp_text_ema_16M'
     os.makedirs(log_dir, exist_ok=True)
+    os.makedirs(os.path.join(log_dir, 'generated_images'), exist_ok=True)
     copyfile(os.path.realpath(__file__), os.path.join(log_dir, os.path.realpath(__file__).split('/')[-1]))
     logger = log.setup_custom_logger(log_dir, 'root')
     logger.debug('main')
@@ -592,17 +641,23 @@ if __name__ == '__main__':
     writer = SummaryWriter(os.path.join(log_dir, 'runs'))
 
     df = pd.read_csv(os.path.join(root, 'dataset_rsicd.csv'))
+    df = df.iloc[:10, :]
     data = SatDataset(df, os.path.join(root, 'RSICD_images'))
     dataloader = DataLoader(data, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
 
     cuda = torch.cuda.is_available()
     device = torch.device('cuda' if cuda else 'cpu')
-    schedule_opt = {'schedule': 'linear', 'n_timestep': 1000, 'linear_start': 1e-4, 'linear_end': 0.05}
+    schedule_opt = {'schedule': 'linear', 'n_timestep': 1000}
 
     ddpm = DDPM(device, dataloader=dataloader, schedule_opt=schedule_opt,
                 save_path=os.path.join(log_dir, 'c_txt_ddpm.ckpt'), load_path=os.path.join(log_dir, 'c_txt_ddpm.ckpt'),
                 load=False, img_size=img_size,
                 inner_channel=128,
-                norm_groups=32, channel_mults=[1, 2, 2, 2], res_blocks=2, dropout=0.2, lr=5 * 1e-5,
+                norm_groups=32, channel_mults=[1, 2, 4, 8], res_blocks=2, dropout=0.2, lr=5 * 1e-5,
                 distributed=False)
-    ddpm.train(epoch=1000, verbose=5)
+
+    # val = sum([p.numel() for p in ddpm.ddpm.parameters()])
+    # print(f'ddpm {val:,} all parameters')
+    # val = sum([p.numel() for p in ddpm.ddpm.parameters() if p.requires_grad])
+    # print(f'ddpm {val:,} trainable parameters')
+    ddpm.train(epoch=1000, verbose=1)
