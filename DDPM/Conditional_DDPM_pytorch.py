@@ -248,22 +248,22 @@ class Diffusion(nn.Module):
         self.device = device
         self.loss_func = nn.L1Loss(reduction='sum')
 
-    def make_beta_schedule(self, schedule, n_timestep, linear_start=1e-4, linear_end=2e-2):
+    def make_beta_schedule(self, schedule):
         if schedule == 'linear':
-            betas = np.linspace(linear_start, linear_end, n_timestep, dtype=np.float64)
+            betas = np.linspace(1e-4, 2e-2, 1000, dtype=np.float64)
         elif schedule == 'cosine':
-            betas = self.cosine_beta_schedule(n_timestep)
+            betas = self.cosine_beta_schedule()
         else:
             raise NotImplementedError(schedule)
         return betas
 
-    def cosine_beta_schedule(self, n_timestep):
+    def cosine_beta_schedule(self):
         betas = []
         max_beta = 0.999
         alpha_bar = lambda t: math.cos((t + 0.008) / 1.008 * math.pi / 2) ** 2
-        for i in range(n_timestep):
-            t1 = i / n_timestep
-            t2 = (i + 1) / n_timestep
+        for i in range(1000):
+            t1 = i / 1000
+            t2 = (i + 1) / 1000
             betas.append(min(1 - alpha_bar(t2) / alpha_bar(t1), max_beta))
         return np.array(betas, dtype=np.float64)
 
@@ -271,10 +271,7 @@ class Diffusion(nn.Module):
         to_torch = partial(torch.tensor, dtype=torch.float32, device=self.device)
 
         betas = self.make_beta_schedule(
-            schedule=schedule_opt['schedule'],
-            n_timestep=schedule_opt['n_timestep'],
-            linear_start=schedule_opt['linear_start'],
-            linear_end=schedule_opt['linear_end'])
+            schedule=schedule_opt['schedule'])
         betas = betas.detach().cpu().numpy() if isinstance(betas, torch.Tensor) else betas
         alphas = 1. - betas
         alphas_cumprod = np.cumprod(alphas, axis=0)
@@ -375,16 +372,17 @@ class DDPM:
     def __init__(self, device, dataloader, schedule_opt, save_path,
                  load_path=None, load=False, in_channel=3, out_channel=3, inner_channel=32,
                  norm_groups=16, channel_mults=(1, 2, 4, 8, 8), res_blocks=3, dropout=0.0,
-                 img_size=64, lr=1e-4, num_classes=2, distributed=False):
+                 img_size=64, lr=1e-4, num_classes=3, distributed=False):
         super(DDPM, self).__init__()
         self.dataloader = dataloader
         self.device = device
         self.save_path = save_path
         self.in_channel = in_channel
         self.img_size = img_size
+        self.num_classes = num_classes
 
         model = UNet(in_channel, out_channel, inner_channel, norm_groups, channel_mults, res_blocks, img_size,
-                     num_classes=num_classes)
+                     num_classes=self.num_classes)
         self.ddpm = Diffusion(model, device, out_channel)
 
         # Apply weight initialization & set loss & set noise schedule
@@ -400,8 +398,8 @@ class DDPM:
         self.train_loss = 0
 
         params = sum(p.numel() for p in self.ddpm.parameters())
-        # print(f'Number of model parameters : {params}')
-        logger.info(f'Number of model parameters : {params}')
+        # print(f'Number of model parameters : {params:,}')
+        logger.info(f'Number of model parameters : {params:,}')
 
         if load:
             self.load(load_path)
@@ -421,10 +419,10 @@ class DDPM:
             init.constant_(m.bias.data, 0.0)
 
     def train(self, epoch, verbose):
-        fixed_noise = torch.randn(16, self.in_channel, self.img_size, self.img_size).to(self.device)
-        fixed_lbl = torch.randint(0, 10, (16,)).to(self.device)
-        ema = EMA(0.995)
-        ema_model = copy.deepcopy(self.ddpm).eval().requires_grad_(False)
+        fixed_noise = torch.randn(4, self.in_channel, self.img_size, self.img_size).to(self.device)
+        fixed_lbl = torch.randint(0, self.num_classes, (4,)).to(self.device)
+        # ema = EMA(0.995)
+        # ema_model = copy.deepcopy(self.ddpm).eval().requires_grad_(False)
         fid = FrechetInceptionDistance(feature=64, normalize=True)
 
         for i in range(self.current_epoch, epoch):
@@ -442,7 +440,7 @@ class DDPM:
                 loss = loss.sum() / int(b * c * h * w)
                 loss.backward()
                 self.optimizer.step()
-                ema.step_ema(ema_model, self.ddpm)
+                # ema.step_ema(ema_model, self.ddpm)
                 self.train_loss += loss.item() * b
             self.current_epoch += 1
             current_loss = self.train_loss / len(self.dataloader)
@@ -451,32 +449,33 @@ class DDPM:
             if (i + 1) % verbose == 0:
                 real_imgs, _ = next(iter(self.dataloader))
                 fid.update(real_imgs, real=True)
+                image_save_path = os.path.join('/'.join(self.save_path.split('/')[:-1]), 'generated_images')
 
                 # Save example of test images to check training
                 gen_imgs = self.test(self.ddpm, fixed_noise, fixed_lbl)
                 fid.update(gen_imgs.detach().cpu(), real=False)
                 gen_imgs = np.transpose(torchvision.utils.make_grid(
                     gen_imgs.detach().cpu(), nrow=4, padding=2, normalize=True), (1, 2, 0))
-                matplotlib.image.imsave(os.path.join('/'.join(self.save_path.split('/')[:-1]),
-                                                     f'generated_images_c_ddpm_cfg_{self.current_epoch}.jpg'),
+                matplotlib.image.imsave(os.path.join(image_save_path,
+                                                     f'c_ddpm_cfg_{self.current_epoch}.jpg'),
                                         gen_imgs.numpy())
                 logger.info(f'FID: {fid.compute().item()}')
                 writer.add_scalar('FID/CFG Model', fid.compute().item(), self.current_epoch)
 
                 # Save example of test images to check training
-                gen_imgs = self.test(ema_model, fixed_noise, fixed_lbl)
-                fid.update(gen_imgs.detach().cpu(), real=False)
-                gen_imgs = np.transpose(torchvision.utils.make_grid(
-                    gen_imgs.detach().cpu(), nrow=4, padding=2, normalize=True), (1, 2, 0))
-                matplotlib.image.imsave(os.path.join('/'.join(self.save_path.split('/')[:-1]),
-                                                     f'generated_images_c_ddpm_cfg_ema_{self.current_epoch}.jpg'),
-                                        gen_imgs.numpy())
-                logger.info(f'EMA FID: {fid.compute().item()}')
-                writer.add_scalar('FID/EMA CFG Model', fid.compute().item(), self.current_epoch)
+                # gen_imgs = self.test(ema_model, fixed_noise, fixed_lbl)
+                # fid.update(gen_imgs.detach().cpu(), real=False)
+                # gen_imgs = np.transpose(torchvision.utils.make_grid(
+                #     gen_imgs.detach().cpu(), nrow=4, padding=2, normalize=True), (1, 2, 0))
+                # matplotlib.image.imsave(os.path.join(image_save_path,
+                #                                      f'c_ddpm_cfg_ema_{self.current_epoch}.jpg'),
+                #                         gen_imgs.numpy())
+                # logger.info(f'EMA FID: {fid.compute().item()}')
+                # writer.add_scalar('FID/EMA CFG Model', fid.compute().item(), self.current_epoch)
 
                 # Save model weight
                 self.save(self.save_path, self.ddpm)
-                self.save(self.save_path.replace('.ckpt', '_ema.ckpt'), ema_model)
+                # self.save(self.save_path.replace('.ckpt', '_ema.ckpt'), ema_model)
                 writer.add_scalar('Epoch', self.current_epoch, self.current_epoch)
                 writer.add_scalar('Loss/train', current_loss, self.current_epoch)
 
@@ -509,29 +508,34 @@ class DDPM:
 
     def load(self, load_path):
         network = self.ddpm
-        checkpoint = torch.load(load_path)
-        if isinstance(self.ddpm, nn.DataParallel):
-            network = network.module
-        network.load_state_dict(checkpoint['model_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        self.current_epoch = checkpoint['epoch']
-        self.train_loss = checkpoint['loss']
-        # Set rng state
-        torch.set_rng_state(checkpoint['torch_rng_state'])
-        torch.cuda.set_rng_state(checkpoint['torch_cuda_rng_state'])
-        np.random.set_state(checkpoint['np_rng_state'])
-        random.setstate(checkpoint['random_rgn_state'])
-        logger.info('Model loaded successfully')
+        if os.path.isfile(load_path):
+            checkpoint = torch.load(load_path)
+            if isinstance(self.ddpm, nn.DataParallel):
+                network = network.module
+            network.load_state_dict(checkpoint['model_state_dict'])
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            self.current_epoch = checkpoint['epoch']
+            self.train_loss = checkpoint['loss']
+            # Set rng state
+            torch.set_rng_state(checkpoint['torch_rng_state'])
+            torch.cuda.set_rng_state(checkpoint['torch_cuda_rng_state'])
+            np.random.set_state(checkpoint['np_rng_state'])
+            random.setstate(checkpoint['random_rgn_state'])
+            logger.info('Model loaded successfully')
+        else:
+            logger.info('Model not found!')
 
 
 if __name__ == '__main__':
-    batch_size = 16
+    batch_size = 8
     img_size = 64
     # root = '/home/asebaq/CholecT50_sample/data/images'
     # root = '/home/asebaq/SAC/healthy_aug_22_good'
-    root = '/home/asebaq/Downloads/cifar-10-python/cifar-10-batches-py/cifar10-64/data'
-    log_dir = './logs/exp_cifar10_ema_cfg'
+    # root = '/home/asebaq/Downloads/cifar-10-python/cifar-10-batches-py/cifar10-64/data'
+    root = '/home/asebaq/NU/dsa_data_copy'
+    log_dir = './logs/exp_dsa_data_lr0001_linear'
     os.makedirs(log_dir, exist_ok=True)
+    os.makedirs(os.path.join(log_dir, 'generated_images'), exist_ok=True)
     copyfile(os.path.realpath(__file__), os.path.join(log_dir, os.path.realpath(__file__).split('/')[-1]))
     logger = log.setup_custom_logger(log_dir, 'root')
     logger.debug('main')
@@ -546,12 +550,12 @@ if __name__ == '__main__':
 
     cuda = torch.cuda.is_available()
     device = torch.device('cuda' if cuda else 'cpu')
-    schedule_opt = {'schedule': 'linear', 'n_timestep': 1000, 'linear_start': 1e-4, 'linear_end': 0.05}
+    schedule_opt = {'schedule': 'linear'}
 
     ddpm = DDPM(device, dataloader=dataloader, schedule_opt=schedule_opt,
                 save_path=os.path.join(log_dir, 'c_cfg_ddpm.ckpt'), load_path=os.path.join(log_dir, 'c_cfg_ddpm.ckpt'),
                 load=True, img_size=img_size,
                 inner_channel=128,
-                norm_groups=32, channel_mults=[1, 2, 2, 2], res_blocks=2, dropout=0.2, lr=5 * 1e-5, num_classes=10,
+                norm_groups=32, channel_mults=[1, 2, 2, 2], res_blocks=2, dropout=0.2, lr=1e-4, num_classes=3,
                 distributed=False)
     ddpm.train(epoch=1000, verbose=5)

@@ -26,6 +26,7 @@ def prepare_df(base_dir, js_file_name):
     for i in range(1, 6):
         df[f'sent{i}_len'] = df[f'sent{i}'].apply(lambda sent: len(sent.split()))
 
+    df['class'] = df['filename'].apply(lambda x: x.split('_')[0])
     df.drop(['sentences', 'sentids'], axis=1, inplace=True)
     df.to_csv(js_path.replace('.json', '.csv'), index=False)
     return df
@@ -41,6 +42,10 @@ def main():
     sent1 = df.sent1[0]
     print(sent1)
     print(len(sent1.split()))
+
+    print(df['class'][df['class'].str.isalpha().values].value_counts())
+    df['class'][df['class'].str.isalpha().values].value_counts().plot(kind='bar')
+    plt.show()
 
     filename = df.filename[8551]
     print(filename)

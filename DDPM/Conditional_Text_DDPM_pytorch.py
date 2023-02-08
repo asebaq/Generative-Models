@@ -19,6 +19,7 @@ from torch.nn import init
 from torch.utils.data import DataLoader
 from PIL import Image
 from transformers import BertTokenizer, BertModel
+from transformers import T5Tokenizer, T5Model
 # from tqdm.notebook import tqdm
 from tqdm import tqdm
 import pandas as pd
@@ -162,7 +163,7 @@ class ResBlock(nn.Module):
 class UNet(nn.Module):
     def __init__(self, in_channel=3, out_channel=3, inner_channel=32, norm_groups=32,
                  channel_mults=(1, 2, 4, 8, 8), res_blocks=3, img_size=128, dropout=0.0,
-                 text_embed_dim=768, max_text_len=256, text=None):
+                 text_embed_dim=512, max_text_len=256, text=None):
         super().__init__()
 
         noise_level_channel = inner_channel
@@ -383,22 +384,27 @@ class Diffusion(nn.Module):
 
 
 class SatDataset(torch.utils.data.Dataset):
-    def __init__(self, df, root, split='train'):
+    def __init__(self, df, root, split='train', model='t5'):
         self.df = df[df['split'] == split].reset_index(drop=True)
         self.root = root
-        self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-        self.model = BertModel.from_pretrained('bert-base-uncased',
-                                               output_hidden_states=True,
-                                               )
+        if model == 'bert':
+            self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+            self.model = BertModel.from_pretrained('bert-base-uncased',
+                                                   output_hidden_states=True,
+                                                   )
+        else:
+            self.tokenizer = T5Tokenizer.from_pretrained('t5-small')
+            self.model = T5Model.from_pretrained('t5-small')
+
         self.transforms_ = transforms.Compose([transforms.Resize(64), transforms.ToTensor(),
                                                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
-        self.transforms_ = transforms.Compose([transforms.Resize(64), transforms.ToTensor()])
+        # self.transforms_ = transforms.Compose([transforms.Resize(64), transforms.ToTensor()])
 
     def __len__(self):
         return len(self.df)
 
-    def embed_text(self, text):
-        marked_text = "[CLS] " + text + " [SEP]"
+    def embed_text_bert(self, text):
+        marked_text = '[CLS] ' + text + ' [SEP]'
         tokenized_text = self.tokenizer.tokenize(marked_text)
         indexed_tokens = self.tokenizer.convert_tokens_to_ids(tokenized_text)
         segments_ids = [1] * len(tokenized_text)
@@ -414,6 +420,19 @@ class SatDataset(torch.utils.data.Dataset):
             token_embeddings_sum[i] = torch.sum(token_embeddings[i, -4:], dim=0)
         return token_embeddings_sum
 
+    def embed_text_t5(self, text):
+        input_ids = self.tokenizer(text, return_tensors='pt').input_ids  # Batch size 1
+        decoder_input_ids = self.tokenizer('Studies show that', return_tensors='pt').input_ids  # Batch size 1
+
+        # preprocess: Prepend decoder_input_ids with start token which is pad token for T5Model.
+        # This is not needed for torch's T5ForConditionalGeneration as it does this internally using labels arg.
+        decoder_input_ids = self.model._shift_right(decoder_input_ids)
+
+        # forward pass
+        outputs = self.model(input_ids=input_ids, decoder_input_ids=decoder_input_ids)
+        last_hidden_states = outputs.last_hidden_state
+        return last_hidden_states[0]
+
     def __getitem__(self, idx):
         # Read image
         img_path = os.path.join(self.root, self.df.filename[idx])
@@ -421,7 +440,9 @@ class SatDataset(torch.utils.data.Dataset):
         img = self.transforms_(img)
 
         txt = self.df.sent1[idx]
-        tokens = self.embed_text(txt)
+        # tokens = self.embed_text_bert(txt)
+        tokens = self.embed_text_t5(txt)
+        print(tokens.shape)
 
         data = dict()
         data['image'] = img
@@ -520,55 +541,29 @@ class DDPM:
 
                 txt = txt.replace(' ', '_')[:-1]
                 image_save_path = os.path.join('/'.join(self.save_path.split('/')[:-1]), 'generated_images')
-                fid.update(real_imgs, real=True)
-                # inception.update(real_imgs)
 
                 # Save example of test images to check training
                 fixed_noise = torch.randn(1, self.in_channel, self.img_size, self.img_size).to(self.device)
                 start = time.time()
                 gen_imgs = self.test(self.ddpm, fixed_noise, tokens)
                 gen_imgs = gen_imgs.detach().cpu()
-                print(gen_imgs.min())
-                print(gen_imgs.max())
-                print(torch.isnan(gen_imgs).sum())
-                print(torch.isinf(gen_imgs).sum())
-
                 logger.info(f'Inference time: {round(time.time() - start, 3)} sec')
-                fid.update(gen_imgs, real=False)
-                fid_val = fid.compute().item()
 
-                # inception.update(torch.unsqueeze(gen_imgs, 0).type(torch.uint8))
                 gen_imgs = np.transpose(torchvision.utils.make_grid(
                     gen_imgs, nrow=1, padding=2, normalize=True), (1, 2, 0))
                 matplotlib.image.imsave(os.path.join(image_save_path,
                                                      f'{txt}_ddpm_{self.current_epoch}.jpg'),
                                         gen_imgs.numpy())
 
-                logger.info(f'FID: {fid_val}')
-                # logger.info(f'Inception: {inception.compute().item()}')
-                writer.add_scalar('FID/Model', fid_val, self.current_epoch)
-                # writer.add_scalar('Inception/Model', inception.compute().item(), self.current_epoch)
-
                 # Save example of test images to check training
                 gen_imgs = self.test(ema_model, fixed_noise, tokens)
                 gen_imgs = gen_imgs.detach().cpu()
-                print(torch.isnan(gen_imgs).sum())
-                print(torch.isinf(gen_imgs).sum())
 
-                fid.update(gen_imgs, real=False)
-                fid_val = fid.compute()
-                fid_val = fid_val.item()
-
-                # inception.update(torch.unsqueez(gen_imgs, 0))
                 gen_imgs = np.transpose(torchvision.utils.make_grid(
                     gen_imgs, nrow=1, padding=2, normalize=True), (1, 2, 0))
                 matplotlib.image.imsave(os.path.join(image_save_path,
                                                      f'{txt}_ddpm_ema_{self.current_epoch}.jpg'),
                                         gen_imgs.numpy())
-                logger.info(f'EMA FID: {fid_val}')
-                # logger.info(f'EMA Inception: {inception.compute().item()}')
-                writer.add_scalar('FID/EMA Model', fid_val, self.current_epoch)
-                # writer.add_scalar('Inception/EMA Model', inception.compute().item(), self.current_epoch)
 
                 # Save model weight
                 self.save(self.save_path, self.ddpm)

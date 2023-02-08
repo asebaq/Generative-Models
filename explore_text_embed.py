@@ -66,8 +66,8 @@ def main():
     print(token_embeddings_sum.shape)
 
     # TODO: Pad T5 embeddings
-    tokenizer = T5Tokenizer.from_pretrained("t5-base")
-    model = T5Model.from_pretrained("t5-base")
+    tokenizer = T5Tokenizer.from_pretrained("t5-small")
+    model = T5Model.from_pretrained("t5-small")
 
     input_ids = tokenizer(sent1, return_tensors="pt").input_ids  # Batch size 1
     decoder_input_ids = tokenizer("Studies show that", return_tensors="pt").input_ids  # Batch size 1
