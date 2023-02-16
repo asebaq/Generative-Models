@@ -1,14 +1,3 @@
-from utils.seed_everything import seed_everything
-from torch.utils.tensorboard import SummaryWriter
-import torchvision.transforms as transforms
-from torch.utils.data import DataLoader
-import torch.nn.functional as F
-from functools import partial
-from einops import rearrange
-from shutil import copyfile
-from torch.nn import init
-from tqdm import tqdm
-from utils import log
 import os
 import sys
 import time
@@ -22,6 +11,17 @@ import numpy as np
 import torchvision
 from torch import nn
 sys.path.append('..')
+from utils import log
+from tqdm import tqdm
+from torch.nn import init
+from shutil import copyfile
+from einops import rearrange
+from functools import partial
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+import torchvision.transforms as transforms
+from torch.utils.tensorboard import SummaryWriter
+from utils.seed_everything import seed_everything
 
 
 class TimeEmbed(nn.Module):
@@ -375,6 +375,7 @@ class DDPM:
         self.train_loss = 0
 
         params = sum(p.numel() for p in self.ddpm.parameters())
+        # print(f'Number of model parameters : {params}')
         logger.info(f'Number of DDPM model parameters : {params:,}')
 
         if load:
@@ -453,6 +454,7 @@ class DDPM:
         state_dict = network.state_dict()
         for key, param in state_dict.items():
             state_dict[key] = param.cpu()
+        # torch.save(state_dict, save_path)
         torch.save({
             'epoch': self.current_epoch,
             'model_state_dict': state_dict,

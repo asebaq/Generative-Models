@@ -1,39 +1,33 @@
-import math
 import os
-from functools import partial
-
-import matplotlib
-import matplotlib.pyplot as plt
-import copy
-
-import numpy as np
-import torch
-import torch.nn.functional as F
-import torchvision
-import torchvision.transforms as transforms
-from einops import rearrange
-from einops.layers.torch import Rearrange
-
-from torch import nn
-from torch.nn import init
-from torch.utils.data import DataLoader
-from PIL import Image
-from transformers import BertTokenizer, BertModel
-from transformers import T5Tokenizer, T5Model
-# from tqdm.notebook import tqdm
-from tqdm import tqdm
-import pandas as pd
-from torch.utils.tensorboard import SummaryWriter
-from torchmetrics.image.fid import FrechetInceptionDistance
-from shutil import copyfile
 import sys
-import random
+import math
 import time
-
-sys.path.append('..')
-from utils.seed_everything import seed_everything
+import copy
+import torch
+import random
+import matplotlib
+import torchvision
+import numpy as np
+import pandas as pd
+from torch import nn
+from PIL import Image
 from utils import log
+from tqdm import tqdm
+sys.path.append('..')
+from torch.nn import init
+from shutil import copyfile
+from einops import rearrange
+from functools import partial
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+import torchvision.transforms as transforms
+from transformers import T5Tokenizer, T5Model
+from torch.utils.tensorboard import SummaryWriter
+from transformers import BertTokenizer, BertModel
+from utils.seed_everything import seed_everything
 from torchmetrics.image.inception import InceptionScore
+from torchmetrics.image.fid import FrechetInceptionDistance
+
 
 
 class EMA:
@@ -72,8 +66,10 @@ class TimeEmbed(nn.Module):
     def forward(self, time):
         # Input tensor should be shape of [B, 1] with value of time
         count = self.dim // 2
-        embed = torch.arange(count, dtype=time.dtype, device=time.device) / count
-        embed = time.unsqueeze(1) * torch.exp(-math.log(1e4) * embed.unsqueeze(0))
+        embed = torch.arange(count, dtype=time.dtype,
+                             device=time.device) / count
+        embed = time.unsqueeze(
+            1) * torch.exp(-math.log(1e4) * embed.unsqueeze(0))
         embed = torch.cat([embed.sin(), embed.cos()], dim=-1)
         return embed
 
@@ -129,13 +125,15 @@ class SelfAtt(nn.Module):
     def forward(self, x):
         b, c, h, w = x.size()
         x = self.groupnorm(x)
-        qkv = rearrange(self.qkv(x), 'b (qkv heads c) h w -> (qkv) b heads c (h w)', heads=self.num_heads, qkv=3)
+        qkv = rearrange(self.qkv(
+            x), 'b (qkv heads c) h w -> (qkv) b heads c (h w)', heads=self.num_heads, qkv=3)
         queries, keys, values = qkv[0], qkv[1], qkv[2]
 
         keys = F.softmax(keys, dim=-1)
         att = torch.einsum('bhdn,bhen->bhde', keys, values)
         out = torch.einsum('bhde,bhdn->bhen', att, queries)
-        out = rearrange(out, 'b heads c (h w) -> b (heads c) h w', heads=self.num_heads, h=h, w=w)
+        out = rearrange(out, 'b heads c (h w) -> b (heads c) h w',
+                        heads=self.num_heads, h=h, w=w)
 
         return self.proj(out)
 
@@ -145,10 +143,13 @@ class ResBlock(nn.Module):
         super().__init__()
         self.mlp = nn.Sequential(Mish(), nn.Linear(time_emb_dim, dim_out))
         self.block1 = Block(dim, dim_out, groups=norm_groups)
-        self.block2 = Block(dim_out, dim_out, groups=norm_groups, dropout=dropout)
-        self.res_conv = nn.Conv2d(dim, dim_out, 1) if dim != dim_out else nn.Identity()
+        self.block2 = Block(
+            dim_out, dim_out, groups=norm_groups, dropout=dropout)
+        self.res_conv = nn.Conv2d(
+            dim, dim_out, 1) if dim != dim_out else nn.Identity()
         self.att = att
-        self.attn = SelfAtt(dim_out, num_heads=num_heads, norm_groups=norm_groups)
+        self.attn = SelfAtt(dim_out, num_heads=num_heads,
+                            norm_groups=norm_groups)
 
     def forward(self, x, time_emb):
         y = self.block1(x)
@@ -181,7 +182,8 @@ class UNet(nn.Module):
         now_res = img_size
 
         # Downsampling stage of U-net
-        downs = [nn.Conv2d(in_channel, inner_channel, kernel_size=3, padding=1)]
+        downs = [nn.Conv2d(in_channel, inner_channel,
+                           kernel_size=3, padding=1)]
         for ind in range(num_mults):
             is_last = (ind == num_mults - 1)
             channel_mult = inner_channel * channel_mults[ind]
@@ -272,7 +274,8 @@ class Diffusion(nn.Module):
             scale = 1000 / n_timestep
             beta_start = scale * 1e-4
             beta_end = scale * 2e-2
-            betas = np.linspace(beta_start, beta_end, n_timestep, dtype=np.float64)
+            betas = np.linspace(beta_start, beta_end,
+                                n_timestep, dtype=np.float64)
         elif schedule == 'cosine':
             betas = self.cosine_beta_schedule(n_timestep)
         else:
@@ -282,7 +285,8 @@ class Diffusion(nn.Module):
     def cosine_beta_schedule(self, n_timestep):
         betas = []
         max_beta = 0.999
-        alpha_bar = lambda t: math.cos((t + 0.008) / 1.008 * math.pi / 2) ** 2
+        def alpha_bar(t): return math.cos(
+            (t + 0.008) / 1.008 * math.pi / 2) ** 2
         for i in range(n_timestep):
             t1 = i / n_timestep
             t2 = (i + 1) / n_timestep
@@ -290,7 +294,8 @@ class Diffusion(nn.Module):
         return np.array(betas, dtype=np.float64)
 
     def set_new_noise_schedule(self, schedule_opt):
-        to_torch = partial(torch.tensor, dtype=torch.float32, device=self.device)
+        to_torch = partial(
+            torch.tensor, dtype=torch.float32, device=self.device)
 
         betas = self.make_beta_schedule(
             schedule=schedule_opt['schedule'],
@@ -306,15 +311,19 @@ class Diffusion(nn.Module):
         # Coefficient for forward diffusion q(x_t | x_{t-1}) and others
         self.register_buffer('betas', to_torch(betas))
         self.register_buffer('alphas_cumprod', to_torch(alphas_cumprod))
-        self.register_buffer('alphas_cumprod_prev', to_torch(alphas_cumprod_prev))
-        self.register_buffer('pred_coef1', to_torch(np.sqrt(1. / alphas_cumprod)))
-        self.register_buffer('pred_coef2', to_torch(np.sqrt(1. / alphas_cumprod - 1)))
+        self.register_buffer('alphas_cumprod_prev',
+                             to_torch(alphas_cumprod_prev))
+        self.register_buffer('pred_coef1', to_torch(
+            np.sqrt(1. / alphas_cumprod)))
+        self.register_buffer('pred_coef2', to_torch(
+            np.sqrt(1. / alphas_cumprod - 1)))
 
         # Coefficient for reverse diffusion posterior q(x_{t-1} | x_t, x_0)
         variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
         self.register_buffer('variance', to_torch(variance))
         # below: log.py calculation clipped because the posterior variance is 0 at the beginning of the diffusion chain
-        self.register_buffer('posterior_log_variance_clipped', to_torch(np.log(np.maximum(variance, 1e-20))))
+        self.register_buffer('posterior_log_variance_clipped', to_torch(
+            np.log(np.maximum(variance, 1e-20))))
         self.register_buffer('posterior_mean_coef1',
                              to_torch(betas * np.sqrt(alphas_cumprod_prev) / (1. - alphas_cumprod)))
         self.register_buffer('posterior_mean_coef2',
@@ -326,7 +335,8 @@ class Diffusion(nn.Module):
 
     # Compute mean and log.py variance of posterior(reverse diffusion process) distribution
     def q_posterior(self, x_start, x_t, t):
-        posterior_mean = self.posterior_mean_coef1[t] * x_start + self.posterior_mean_coef2[t] * x_t
+        posterior_mean = self.posterior_mean_coef1[t] * \
+            x_start + self.posterior_mean_coef2[t] * x_t
         posterior_log_variance_clipped = self.posterior_log_variance_clipped[t]
         return posterior_mean, posterior_log_variance_clipped
 
@@ -336,21 +346,24 @@ class Diffusion(nn.Module):
     def p_mean_variance(self, x, t, txt, clip_denoised: bool):
         batch_size = x.shape[0]
 
-        pred_noise = self.model(x, torch.full((batch_size, 1), t, device=x.device), txt)
+        pred_noise = self.model(x, torch.full(
+            (batch_size, 1), t, device=x.device), txt)
 
         x_recon = self.predict_start(x, t, pred_noise)
 
         if clip_denoised:
             x_recon.clamp_(-1., 1.)
 
-        mean, posterior_log_variance = self.q_posterior(x_start=x_recon, x_t=x, t=t)
+        mean, posterior_log_variance = self.q_posterior(
+            x_start=x_recon, x_t=x, t=t)
         return mean, posterior_log_variance
 
     # Progress single step of reverse diffusion process
     # Given mean and log.py variance of posterior, sample reverse diffusion result from the posterior
     @torch.no_grad()
     def p_sample(self, x, t, txt, clip_denoised=True):
-        mean, log_variance = self.p_mean_variance(x=x, t=t, txt=txt, clip_denoised=clip_denoised)
+        mean, log_variance = self.p_mean_variance(
+            x=x, t=t, txt=txt, clip_denoised=clip_denoised)
         noise = torch.randn_like(x) if t > 0 else torch.zeros_like(x)
         return mean + noise * (0.5 * log_variance).exp()
 
@@ -367,7 +380,8 @@ class Diffusion(nn.Module):
         b, c, h, w = x_start.shape
         t = np.random.randint(1, self.num_timesteps + 1)
         sqrt_alpha = torch.FloatTensor(
-            np.random.uniform(self.sqrt_alphas_cumprod_prev[t - 1], self.sqrt_alphas_cumprod_prev[t], size=b)
+            np.random.uniform(
+                self.sqrt_alphas_cumprod_prev[t - 1], self.sqrt_alphas_cumprod_prev[t], size=b)
         ).to(x_start.device)
         sqrt_alpha = sqrt_alpha.view(-1, 1, 1, 1)
 
@@ -375,7 +389,8 @@ class Diffusion(nn.Module):
         # Perturbed image obtained by forward diffusion process at random time step t
         x_noisy = sqrt_alpha * x_start + (1 - sqrt_alpha ** 2).sqrt() * noise
         # The model predict actual noise added at time step t
-        pred_noise = self.model(x_noisy, torch.full((b, 1), t, device=x_start.device), txt)
+        pred_noise = self.model(x_noisy, torch.full(
+            (b, 1), t, device=x_start.device), txt)
 
         return self.loss_func(noise, pred_noise)
 
@@ -415,21 +430,26 @@ class SatDataset(torch.utils.data.Dataset):
             hidden_states = outputs[2]
         token_embeddings = torch.stack(hidden_states, dim=0)
         token_embeddings = torch.squeeze(token_embeddings, dim=1)
-        token_embeddings_sum = torch.zeros((token_embeddings.shape[0], token_embeddings.shape[-1]))
+        token_embeddings_sum = torch.zeros(
+            (token_embeddings.shape[0], token_embeddings.shape[-1]))
         for i in range(token_embeddings.shape[0]):
-            token_embeddings_sum[i] = torch.sum(token_embeddings[i, -4:], dim=0)
+            token_embeddings_sum[i] = torch.sum(
+                token_embeddings[i, -4:], dim=0)
         return token_embeddings_sum
 
     def embed_text_t5(self, text):
-        input_ids = self.tokenizer(text, return_tensors='pt').input_ids  # Batch size 1
-        decoder_input_ids = self.tokenizer('Studies show that', return_tensors='pt').input_ids  # Batch size 1
+        input_ids = self.tokenizer(
+            text, return_tensors='pt').input_ids  # Batch size 1
+        decoder_input_ids = self.tokenizer(
+            'Studies show that', return_tensors='pt').input_ids  # Batch size 1
 
         # preprocess: Prepend decoder_input_ids with start token which is pad token for T5Model.
         # This is not needed for torch's T5ForConditionalGeneration as it does this internally using labels arg.
         decoder_input_ids = self.model._shift_right(decoder_input_ids)
 
         # forward pass
-        outputs = self.model(input_ids=input_ids, decoder_input_ids=decoder_input_ids)
+        outputs = self.model(input_ids=input_ids,
+                             decoder_input_ids=decoder_input_ids)
         last_hidden_states = outputs.last_hidden_state
         return last_hidden_states[0]
 
@@ -528,7 +548,8 @@ class DDPM:
                 self.train_loss += loss.item() * b
             self.current_epoch += 1
             current_loss = self.train_loss / len(self.dataloader)
-            logger.info(f'Epoch: {i + 1} / loss:{current_loss:.3f}, Time: {round(time.time() - start, 3)} sec')
+            logger.info(
+                f'Epoch: {i + 1} / loss:{current_loss:.3f}, Time: {round(time.time() - start, 3)} sec')
 
             if (i + 1) % verbose == 0:
                 data = next(iter(self.dataloader))
@@ -540,14 +561,17 @@ class DDPM:
                 tokens = torch.unsqueeze(tokens, 0)
 
                 txt = txt.replace(' ', '_')[:-1]
-                image_save_path = os.path.join('/'.join(self.save_path.split('/')[:-1]), 'generated_images')
+                image_save_path = os.path.join(
+                    '/'.join(self.save_path.split('/')[:-1]), 'generated_images')
 
                 # Save example of test images to check training
-                fixed_noise = torch.randn(1, self.in_channel, self.img_size, self.img_size).to(self.device)
+                fixed_noise = torch.randn(
+                    1, self.in_channel, self.img_size, self.img_size).to(self.device)
                 start = time.time()
                 gen_imgs = self.test(self.ddpm, fixed_noise, tokens)
                 gen_imgs = gen_imgs.detach().cpu()
-                logger.info(f'Inference time: {round(time.time() - start, 3)} sec')
+                logger.info(
+                    f'Inference time: {round(time.time() - start, 3)} sec')
 
                 gen_imgs = np.transpose(torchvision.utils.make_grid(
                     gen_imgs, nrow=1, padding=2, normalize=True), (1, 2, 0))
@@ -567,9 +591,12 @@ class DDPM:
 
                 # Save model weight
                 self.save(self.save_path, self.ddpm)
-                self.save(self.save_path.replace('.ckpt', '_ema.ckpt'), ema_model)
-                writer.add_scalar('Epoch', self.current_epoch, self.current_epoch)
-                writer.add_scalar('Loss/train', current_loss, self.current_epoch)
+                self.save(self.save_path.replace(
+                    '.ckpt', '_ema.ckpt'), ema_model)
+                writer.add_scalar('Epoch', self.current_epoch,
+                                  self.current_epoch)
+                writer.add_scalar('Loss/train', current_loss,
+                                  self.current_epoch)
 
     def test(self, model, imgs, txt):
         model.eval()
@@ -616,7 +643,8 @@ class DDPM:
 
 
 if __name__ == '__main__':
-    unet = UNet(channel_mults=[1, 2, 4, 8], res_blocks=2, text=True)  # 2,315,715 parameters
+    unet = UNet(channel_mults=[1, 2, 4, 8],
+                res_blocks=2, text=True)  # 2,315,715 parameters
     # val = sum([p.numel() for p in unet.parameters()])
     # print(f'unet {val:,} all parameters')
     # val = sum([p.numel() for p in unet.parameters() if p.requires_grad])
@@ -628,7 +656,8 @@ if __name__ == '__main__':
     log_dir = '/home/asebaq/Generative-Models/DDPM/logs/exp_text_ema_16M'
     os.makedirs(log_dir, exist_ok=True)
     os.makedirs(os.path.join(log_dir, 'generated_images'), exist_ok=True)
-    copyfile(os.path.realpath(__file__), os.path.join(log_dir, os.path.realpath(__file__).split('/')[-1]))
+    copyfile(os.path.realpath(__file__), os.path.join(
+        log_dir, os.path.realpath(__file__).split('/')[-1]))
     logger = log.setup_custom_logger(log_dir, 'root')
     logger.debug('main')
     # Seed
@@ -638,7 +667,8 @@ if __name__ == '__main__':
     df = pd.read_csv(os.path.join(root, 'dataset_rsicd.csv'))
     df = df.iloc[:10, :]
     data = SatDataset(df, os.path.join(root, 'RSICD_images'))
-    dataloader = DataLoader(data, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
+    dataloader = DataLoader(data, batch_size=batch_size,
+                            shuffle=True, num_workers=2, pin_memory=True)
 
     cuda = torch.cuda.is_available()
     device = torch.device('cuda' if cuda else 'cpu')

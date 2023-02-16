@@ -1,27 +1,28 @@
-from utils.seed_everything import seed_everything
-from torch.utils.tensorboard import SummaryWriter
-import torchvision.transforms as transforms
-from torch.utils.data import DataLoader
-import torch.nn.functional as F
-from functools import partial
-from einops import rearrange
-from shutil import copyfile
-from torch.nn import init
-from tqdm import tqdm
-from utils import log
-import os
-import sys
-import time
 import math
-import torch
-import random
+from functools import partial
+
 import matplotlib
 import matplotlib.pyplot as plt
 
 import numpy as np
+import torch
+import torch.nn.functional as F
 import torchvision
+import torchvision.transforms as transforms
+from einops import rearrange
 from torch import nn
-sys.path.append('..')
+from torch.nn import init
+from torch.utils.data import DataLoader
+# from tqdm.notebook import tqdm
+from tqdm import tqdm
+import random
+from shutil import copyfile
+from torch.utils.tensorboard import SummaryWriter
+from utils.seed_everything import seed_everything
+from utils import log
+import time
+
+import os
 
 
 class TimeEmbed(nn.Module):
@@ -32,10 +33,8 @@ class TimeEmbed(nn.Module):
     def forward(self, time):
         # Input tensor should be shape of [B, 1] with value of time
         count = self.dim // 2
-        embed = torch.arange(count, dtype=time.dtype,
-                             device=time.device) / count
-        embed = time.unsqueeze(
-            1) * torch.exp(-math.log(1e4) * embed.unsqueeze(0))
+        embed = torch.arange(count, dtype=time.dtype, device=time.device) / count
+        embed = time.unsqueeze(1) * torch.exp(-math.log(1e4) * embed.unsqueeze(0))
         embed = torch.cat([embed.sin(), embed.cos()], dim=-1)
         return embed
 
@@ -91,15 +90,13 @@ class SelfAtt(nn.Module):
     def forward(self, x):
         b, c, h, w = x.size()
         x = self.groupnorm(x)
-        qkv = rearrange(self.qkv(
-            x), 'b (qkv heads c) h w -> (qkv) b heads c (h w)', heads=self.num_heads, qkv=3)
+        qkv = rearrange(self.qkv(x), 'b (qkv heads c) h w -> (qkv) b heads c (h w)', heads=self.num_heads, qkv=3)
         queries, keys, values = qkv[0], qkv[1], qkv[2]
 
         keys = F.softmax(keys, dim=-1)
         att = torch.einsum('bhdn,bhen->bhde', keys, values)
         out = torch.einsum('bhde,bhdn->bhen', att, queries)
-        out = rearrange(out, 'b heads c (h w) -> b (heads c) h w',
-                        heads=self.num_heads, h=h, w=w)
+        out = rearrange(out, 'b heads c (h w) -> b (heads c) h w', heads=self.num_heads, h=h, w=w)
 
         return self.proj(out)
 
@@ -109,13 +106,10 @@ class ResBlock(nn.Module):
         super().__init__()
         self.mlp = nn.Sequential(Mish(), nn.Linear(time_emb_dim, dim_out))
         self.block1 = Block(dim, dim_out, groups=norm_groups)
-        self.block2 = Block(
-            dim_out, dim_out, groups=norm_groups, dropout=dropout)
-        self.res_conv = nn.Conv2d(
-            dim, dim_out, 1) if dim != dim_out else nn.Identity()
+        self.block2 = Block(dim_out, dim_out, groups=norm_groups, dropout=dropout)
+        self.res_conv = nn.Conv2d(dim, dim_out, 1) if dim != dim_out else nn.Identity()
         self.att = att
-        self.attn = SelfAtt(dim_out, num_heads=num_heads,
-                            norm_groups=norm_groups)
+        self.attn = SelfAtt(dim_out, num_heads=num_heads, norm_groups=norm_groups)
 
     def forward(self, x, time_emb):
         y = self.block1(x)
@@ -146,8 +140,7 @@ class UNet(nn.Module):
         now_res = img_size
 
         # Downsampling stage of U-net
-        downs = [nn.Conv2d(in_channel, inner_channel,
-                           kernel_size=3, padding=1)]
+        downs = [nn.Conv2d(in_channel, inner_channel, kernel_size=3, padding=1)]
         for ind in range(num_mults):
             is_last = (ind == num_mults - 1)
             channel_mult = inner_channel * channel_mults[ind]
@@ -223,8 +216,7 @@ class Diffusion(nn.Module):
             scale = 1000 / n_timestep
             beta_start = scale * 1e-4
             beta_end = scale * 2e-2
-            betas = np.linspace(beta_start, beta_end,
-                                n_timestep, dtype=np.float64)
+            betas = np.linspace(beta_start, beta_end, n_timestep, dtype=np.float64)
         elif schedule == 'cosine':
             betas = self.cosine_beta_schedule(n_timestep)
         else:
@@ -234,8 +226,7 @@ class Diffusion(nn.Module):
     def cosine_beta_schedule(self, n_timestep):
         betas = []
         max_beta = 0.999
-        def alpha_bar(t): return math.cos(
-            (t + 0.008) / 1.008 * math.pi / 2) ** 2
+        alpha_bar = lambda t: math.cos((t + 0.008) / 1.008 * math.pi / 2) ** 2
         for i in range(n_timestep):
             t1 = i / n_timestep
             t2 = (i + 1) / n_timestep
@@ -243,8 +234,7 @@ class Diffusion(nn.Module):
         return np.array(betas, dtype=np.float64)
 
     def set_new_noise_schedule(self, schedule_opt):
-        to_torch = partial(
-            torch.tensor, dtype=torch.float32, device=self.device)
+        to_torch = partial(torch.tensor, dtype=torch.float32, device=self.device)
 
         betas = self.make_beta_schedule(
             schedule=schedule_opt['schedule'],
@@ -261,19 +251,15 @@ class Diffusion(nn.Module):
         # Coefficient for forward diffusion q(x_t | x_{t-1}) and others
         self.register_buffer('betas', to_torch(betas))
         self.register_buffer('alphas_cumprod', to_torch(alphas_cumprod))
-        self.register_buffer('alphas_cumprod_prev',
-                             to_torch(alphas_cumprod_prev))
-        self.register_buffer('pred_coef1', to_torch(
-            np.sqrt(1. / alphas_cumprod)))
-        self.register_buffer('pred_coef2', to_torch(
-            np.sqrt(1. / alphas_cumprod - 1)))
+        self.register_buffer('alphas_cumprod_prev', to_torch(alphas_cumprod_prev))
+        self.register_buffer('pred_coef1', to_torch(np.sqrt(1. / alphas_cumprod)))
+        self.register_buffer('pred_coef2', to_torch(np.sqrt(1. / alphas_cumprod - 1)))
 
         # Coefficient for reverse diffusion posterior q(x_{t-1} | x_t, x_0)
         variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
         self.register_buffer('variance', to_torch(variance))
         # below: log.py calculation clipped because the posterior variance is 0 at the beginning of the diffusion chain
-        self.register_buffer('posterior_log_variance_clipped', to_torch(
-            np.log(np.maximum(variance, 1e-20))))
+        self.register_buffer('posterior_log_variance_clipped', to_torch(np.log(np.maximum(variance, 1e-20))))
         self.register_buffer('posterior_mean_coef1',
                              to_torch(betas * np.sqrt(alphas_cumprod_prev) / (1. - alphas_cumprod)))
         self.register_buffer('posterior_mean_coef2',
@@ -285,32 +271,28 @@ class Diffusion(nn.Module):
 
     # Compute mean and log.py variance of posterior(reverse diffusion process) distribution
     def q_posterior(self, x_start, x_t, t):
-        posterior_mean = self.posterior_mean_coef1[t] * \
-            x_start + self.posterior_mean_coef2[t] * x_t
+        posterior_mean = self.posterior_mean_coef1[t] * x_start + self.posterior_mean_coef2[t] * x_t
         posterior_log_variance_clipped = self.posterior_log_variance_clipped[t]
         return posterior_mean, posterior_log_variance_clipped
 
     # Note that posterior q for reverse diffusion process is conditioned Gaussian distribution q(x_{t-1}|x_t, x_0)
-    # Thus to compute desired posterior q, we need original image x_0 in ideal,
+    # Thus to compute desired posterior q, we need original image x_0 in ideal, 
     # but it's impossible for actual training procedure -> Thus we reconstruct desired x_0 and use this for posterior
     def p_mean_variance(self, x, t, clip_denoised: bool, condition_x=None):
         batch_size = x.shape[0]
-        x_recon = self.predict_start(x, t, noise=self.model(
-            x, torch.full((batch_size, 1), t, device=x.device)))
+        x_recon = self.predict_start(x, t, noise=self.model(x, torch.full((batch_size, 1), t, device=x.device)))
 
         if clip_denoised:
             x_recon.clamp_(-1., 1.)
 
-        mean, posterior_log_variance = self.q_posterior(
-            x_start=x_recon, x_t=x, t=t)
+        mean, posterior_log_variance = self.q_posterior(x_start=x_recon, x_t=x, t=t)
         return mean, posterior_log_variance
 
     # Progress single step of reverse diffusion process
     # Given mean and log.py variance of posterior, sample reverse diffusion result from the posterior
     @torch.no_grad()
     def p_sample(self, x, t, clip_denoised=True):
-        mean, log_variance = self.p_mean_variance(
-            x=x, t=t, clip_denoised=clip_denoised)
+        mean, log_variance = self.p_mean_variance(x=x, t=t, clip_denoised=clip_denoised)
         noise = torch.randn_like(x) if t > 0 else torch.zeros_like(x)
         return mean + noise * (0.5 * log_variance).exp()
 
@@ -327,8 +309,7 @@ class Diffusion(nn.Module):
         b, c, h, w = x_start.shape
         t = np.random.randint(1, self.num_timesteps + 1)
         sqrt_alpha = torch.FloatTensor(
-            np.random.uniform(
-                self.sqrt_alphas_cumprod_prev[t - 1], self.sqrt_alphas_cumprod_prev[t], size=b)
+            np.random.uniform(self.sqrt_alphas_cumprod_prev[t - 1], self.sqrt_alphas_cumprod_prev[t], size=b)
         ).to(x_start.device)
         sqrt_alpha = sqrt_alpha.view(-1, 1, 1, 1)
 
@@ -336,8 +317,7 @@ class Diffusion(nn.Module):
         # Perturbed image obtained by forward diffusion process at random time step t
         x_noisy = sqrt_alpha * x_start + (1 - sqrt_alpha ** 2).sqrt() * noise
         # The model predict actual noise added at time step t
-        pred_noise = self.model(x_noisy, t=torch.full(
-            (b, 1), t, device=x_start.device))
+        pred_noise = self.model(x_noisy, t=torch.full((b, 1), t, device=x_start.device))
 
         return self.loss_func(noise, pred_noise)
 
@@ -358,8 +338,7 @@ class DDPM:
         self.in_channel = in_channel
         self.img_size = img_size
 
-        model = UNet(in_channel, out_channel, inner_channel,
-                     norm_groups, channel_mults, res_blocks, img_size)
+        model = UNet(in_channel, out_channel, inner_channel, norm_groups, channel_mults, res_blocks, img_size)
         self.ddpm = Diffusion(model, device, out_channel)
 
         # Apply weight initialization & set loss & set noise schedule
@@ -375,6 +354,7 @@ class DDPM:
         self.train_loss = 0
 
         params = sum(p.numel() for p in self.ddpm.parameters())
+        # print(f'Number of model parameters : {params}')
         logger.info(f'Number of DDPM model parameters : {params:,}')
 
         if load:
@@ -395,8 +375,7 @@ class DDPM:
             init.constant_(m.bias.data, 0.0)
 
     def train(self, epoch, verbose):
-        fixed_noise = torch.randn(
-            16, self.in_channel, self.img_size, self.img_size).to(self.device)
+        fixed_noise = torch.randn(16, self.in_channel, self.img_size, self.img_size).to(self.device)
         writer = SummaryWriter()
 
         for i in range(self.current_epoch, epoch):
@@ -415,12 +394,10 @@ class DDPM:
                 self.train_loss += loss.item() * b
             self.current_epoch += 1
             current_loss = self.train_loss / len(self.dataloader)
-            logger.info(
-                f'Epoch: {i + 1} / loss:{current_loss:.3f}, Time: {round(time.time() - start, 3)} sec')
+            logger.info(f'Epoch: {i + 1} / loss:{current_loss:.3f}, Time: {round(time.time() - start, 3)} sec')
 
             if (i + 1) % verbose == 0:
-                image_save_path = os.path.join(
-                    '/'.join(self.save_path.split('/')[:-1]), 'generated_images')
+                image_save_path = os.path.join('/'.join(self.save_path.split('/')[:-1]), 'generated_images')
 
                 # Save example of test images to check training
                 gen_imgs = self.test(fixed_noise)
@@ -431,10 +408,8 @@ class DDPM:
 
                 # Save model weight
                 self.save(self.save_path)
-                writer.add_scalar('Epoch', self.current_epoch,
-                                  self.current_epoch)
-                writer.add_scalar('Loss/train', self.train_loss /
-                                  len(self.dataloader), self.current_epoch)
+                writer.add_scalar('Epoch', self.current_epoch, self.current_epoch)
+                writer.add_scalar('Loss/train', self.train_loss / len(self.dataloader), self.current_epoch)
 
     def test(self, imgs):
         self.ddpm.eval()
@@ -453,6 +428,7 @@ class DDPM:
         state_dict = network.state_dict()
         for key, param in state_dict.items():
             state_dict[key] = param.cpu()
+        # torch.save(state_dict, save_path)
         torch.save({
             'epoch': self.current_epoch,
             'model_state_dict': state_dict,
@@ -491,11 +467,10 @@ if __name__ == '__main__':
     batch_size = 4
     img_size = 128
     root = '/home/asebaq/SAC/healthy_aug_22_good'
-    log_dir = '/home/asebaq/dev/Generative-Models/DDPM/logs/exp_uncond_rice_128_lr1e-4'
+    log_dir = '/home/asebaq/dev/Generative-Models/DDPM/logs/exp_uncond_rice_128'
     os.makedirs(log_dir, exist_ok=True)
     os.makedirs(os.path.join(log_dir, 'generated_images'), exist_ok=True)
-    copyfile(os.path.realpath(__file__), os.path.join(
-        log_dir, os.path.realpath(__file__).split('/')[-1]))
+    copyfile(os.path.realpath(__file__), os.path.join(log_dir, os.path.realpath(__file__).split('/')[-1]))
     logger = log.setup_custom_logger(log_dir, 'root')
     logger.debug('main')
     # Seed
@@ -506,8 +481,7 @@ if __name__ == '__main__':
                                       transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
 
     data = torchvision.datasets.ImageFolder(root, transform=transforms_)
-    dataloader = DataLoader(data, batch_size=batch_size,
-                            shuffle=True, num_workers=2, pin_memory=True)
+    dataloader = DataLoader(data, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
 
     cuda = torch.cuda.is_available()
     device = torch.device('cuda' if cuda else 'cpu')
@@ -517,7 +491,7 @@ if __name__ == '__main__':
                 save_path=os.path.join(log_dir, 'ddpm.ckpt'), load_path=os.path.join(log_dir, 'ddpm.ckpt'), load=False,
                 img_size=img_size,
                 inner_channel=128,
-                norm_groups=32, channel_mults=[1, 2, 2, 2], res_blocks=2, dropout=0.2, lr=5 * 1e-4, distributed=False)
+                norm_groups=32, channel_mults=[1, 2, 2, 2], res_blocks=2, dropout=0.2, lr=5 * 1e-5, distributed=False)
     ddpm.train(epoch=1000, verbose=5)
 
     # net = UNet() # 34,939,939 parameters
