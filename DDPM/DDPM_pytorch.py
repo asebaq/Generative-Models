@@ -1,14 +1,3 @@
-from utils.seed_everything import seed_everything
-from torch.utils.tensorboard import SummaryWriter
-import torchvision.transforms as transforms
-from torch.utils.data import DataLoader
-import torch.nn.functional as F
-from functools import partial
-from einops import rearrange
-from shutil import copyfile
-from torch.nn import init
-from tqdm import tqdm
-from utils import log
 import os
 import sys
 import time
@@ -16,12 +5,23 @@ import math
 import torch
 import random
 import matplotlib
-import matplotlib.pyplot as plt
-
 import numpy as np
 import torchvision
 from torch import nn
+
 sys.path.append('..')
+from tqdm import tqdm
+from utils import log
+from torch.nn import init
+from shutil import copyfile
+from einops import rearrange
+from functools import partial
+import matplotlib.pyplot as plt
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+import torchvision.transforms as transforms
+from torch.utils.tensorboard import SummaryWriter
+from utils.seed_everything import seed_everything
 
 
 class TimeEmbed(nn.Module):
@@ -234,8 +234,10 @@ class Diffusion(nn.Module):
     def cosine_beta_schedule(self, n_timestep):
         betas = []
         max_beta = 0.999
+
         def alpha_bar(t): return math.cos(
             (t + 0.008) / 1.008 * math.pi / 2) ** 2
+
         for i in range(n_timestep):
             t1 = i / n_timestep
             t2 = (i + 1) / n_timestep
@@ -286,7 +288,7 @@ class Diffusion(nn.Module):
     # Compute mean and log.py variance of posterior(reverse diffusion process) distribution
     def q_posterior(self, x_start, x_t, t):
         posterior_mean = self.posterior_mean_coef1[t] * \
-            x_start + self.posterior_mean_coef2[t] * x_t
+                         x_start + self.posterior_mean_coef2[t] * x_t
         posterior_log_variance_clipped = self.posterior_log_variance_clipped[t]
         return posterior_mean, posterior_log_variance_clipped
 

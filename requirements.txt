@@ -20,3 +20,8 @@ transformers
 pytorch-transformers
 imutils
 pylint
+# https://github.com/lucidrains
+imagen-pytorch
+lion-pytorch
+nltk
+scikit-learn
