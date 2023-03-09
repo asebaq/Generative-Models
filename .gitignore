@@ -142,3 +142,7 @@ dmypy.json
 /*/logs/*
 /*/cifar-10-python
 /*/output
+/*/*.gz
+/*/t5_base_imdb_sentiment
+/*/lightning_logs
+/*/aclImdb
