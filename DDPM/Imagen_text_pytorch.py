@@ -1,25 +1,26 @@
 import os.path
 import time
 
-import torch
 from imagen_pytorch import Unet, Imagen, ImagenTrainer
-from imagen_pytorch.data import Dataset
 from PIL import Image
 import pandas as pd
 from tqdm import tqdm
-from transformers import T5Tokenizer, T5Model
 
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms as T
 
+from shutil import copyfile
+
+import sys
+sys.path.append('.')
+
 from utils.seed_everything import seed_everything
-from torchmetrics.image.inception import InceptionScore
-from torchmetrics.image.fid import FrechetInceptionDistance
+from utils import log
+from torch.utils.tensorboard import SummaryWriter
 
 
-# class SatDataset(torch.utils.data.Dataset):
 class SatDataset(Dataset):
-    def __init__(self, df, root, image_size=128, transform=None, split='train'):
+    def __init__(self, df, root, image_size=64, transform=None, split='train'):
         self.df = df[df['split'] == split].reset_index(drop=True)
         self.root = root
         self.image_size = image_size
@@ -37,98 +38,120 @@ class SatDataset(Dataset):
         return img, txt
 
 
-def main():
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    seed_everything()
-    fid = FrechetInceptionDistance(feature=2048, normalize=True)
-    inception = InceptionScore()
-    image_size = 224
+def config(log_dir, data_root):
+    os.makedirs(log_dir, exist_ok=True)
+    logger = log.setup_custom_logger(log_dir, 'root')
+    logger.debug('main')
+    writer = SummaryWriter(os.path.join(log_dir, 'runs'))
+    df = pd.read_csv(os.path.join(data_root, 'dataset_rsicd.csv'))
+    os.makedirs(os.path.join(log_dir, 'generated_images'), exist_ok=True)
+    copyfile(os.path.realpath(__file__), os.path.join(log_dir, os.path.realpath(__file__).split('/')[-1]))
+    return logger, writer, df
+
+
+def build_models():
     # unets for unconditional imagen
-    unet = Unet(
+    unet_gen = Unet(
         dim=128,
+        cond_dim=512,
         dim_mults=(1, 2, 4, 8),
-        num_resnet_blocks=1,
-        layer_attns=(False, False, False, True),
-        layer_cross_attns=False
+        num_resnet_blocks=3,
+        layer_attns=(False, True, True, True),
+        layer_cross_attns=(False, True, True, True)
     )
 
-    params = sum(p.numel() for p in unet.parameters())
-    print(f'Number of UNet model parameters : {params:,}')
-
+    
     # imagen, which contains the unet above
     imagen = Imagen(
-        text_encoder_name='t5-small',
-        unets=unet,
-        image_sizes=image_size,
+        text_encoder_name='t5-base',
+        unets=unet_gen,
+        image_sizes=128,
         timesteps=1000,
         cond_drop_prob=0.1
     )
 
-    params = sum(p.numel() for p in imagen.parameters())
-    print(f'Number of Imagen model parameters : {params:,}')
+    return imagen, unet_gen
 
-    trainer = ImagenTrainer(imagen=imagen).cuda()
 
-    # instantiate your dataloader, which returns the necessary inputs to the DDPM as tuple in the order of images,
-    # text embeddings, then text masks.
-    # in this case, only images is returned as it is unconditional training
-    root = '/home/asebaq/RSICD_optimal'
-    log_dir = './logs/exp_imagen_text_bs16_sr'
-    df = pd.read_csv(os.path.join(root, 'dataset_rsicd.csv'))
-
+def build_dataloaders(df, data_root, image_size=64):
     transform = T.Compose([
-        T.Resize(image_size),
+        T.Resize((image_size, image_size)),
         T.RandomHorizontalFlip(),
         T.CenterCrop(image_size),
         T.ToTensor()
     ])
 
-    train_dataset = SatDataset(df, os.path.join(root, 'RSICD_images'), image_size=128, transform=transform)
-    train_dataloader = DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=2, pin_memory=True)
+    train_dataset = SatDataset(df, os.path.join(data_root, 'RSICD_images'), image_size=image_size, transform=transform)
+    train_dataloader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=2, pin_memory=True)
 
     transform = T.Compose([
-        T.Resize(image_size),
+        T.Resize((image_size, image_size)),
         T.ToTensor()
     ])
-    test_dataset = SatDataset(df, os.path.join(root, 'RSICD_images'), image_size=128, transform=transform, split='test')
+    test_dataset = SatDataset(df, os.path.join(data_root, 'RSICD_images'), image_size=image_size, transform=transform,
+                              split='test')
     test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=True, num_workers=2, pin_memory=True)
+    return train_dataloader, test_dataloader
 
-    # Load model
-    model_path = './checkpoint_text.pt'
-    # if os.path.isfile(model_path):
-    #     trainer.load(model_path)
-    epochs = 1000
+
+def train(imagen, df, data_root, logger, writer, log_dir):
+    
+
     # working training loop
-    for i in (1, 2):
-        for j in range(epochs):
-            loss = 0
+    epochs = 1000
+    model_path = os.path.join(log_dir, 'checkpoint.pt')
+
+    train_dataloader, test_dataloader = build_dataloaders(df, data_root, 128)
+    trainer = ImagenTrainer(imagen=imagen)
+    
+    # Load model
+    if os.path.isfile(model_path):
+        trainer.load(model_path)
+        
+    for j in range(277, epochs):
+        loss = 0
+        start = time.time()
+        for _, (imgs, txts) in enumerate(tqdm(train_dataloader)):
+            loss += trainer(
+                imgs,
+                texts=txts,
+                unet_number=1,
+                max_batch_size=4
+            )
+            trainer.update(unet_number=1)
+        loss = loss / (len(train_dataloader) / 64)
+        writer.add_scalar(f'Imagen Model', round(loss, 3), j)
+
+        logger.info(
+            f'Finished epoch {j} with loss: {round(loss, 3)} in {round(time.time() - start, 3)} sec')
+
+        if not (j % 5):
+            data = next(iter(test_dataloader))
+            txt = data[1][0]
             start = time.time()
-            for _, (imgs, txts) in enumerate(tqdm(train_dataloader)):
-                loss += trainer(
-                    imgs,
-                    texts=txts,
-                    unet_number=1,
-                    max_batch_size=4
-                )
-                trainer.update(unet_number=1)
+            images = trainer.sample(texts=[txt], batch_size=1, return_pil_images=True)
+            logger.info(f'Sampling time: {round(time.time() - start, 3)} sec')
+            image_path = os.path.join(log_dir, 'generated_images',
+                                        f"sample-{j}-text-{'_'.join(txt.replace('.', '').split())}.png")
+            images[0].save(image_path)
+        trainer.save(model_path)
 
-            print(f'Finished epoch {i} with loss: {loss / (len(train_dataloader) / 16)} in {round(time.time()-start, 3)} sec')
 
-            if not (i % 1):
-                data = next(iter(test_dataloader))
-                # real_img = data[0]
-                # fid.update(real_img, real=True)
-                txt = data[1][0]
-                start = time.time()
-                images = trainer.sample(texts=[txt], batch_size=1, return_pil_images=True)  # returns List[Image]
-                print(f'Sampling time: {round(time.time() - start, 3)} sec')
-                # fake_img = T.ToTensor()(images[0])
-                # fake_img = torch.unsqueeze(fake_img, dim=0)
-                # fid.update(fake_img, real=False)
-                # fid_score = fid.compute().item()
-                # print('FID:', fid_score)
-                images[0].save(f"./sample-{i}-text-{'_'.join(txt.replace('.', '').split())}.png")
-            trainer.save('./checkpoint_text.pt')
+def main():
+    data_root = '/home/a.sebaq/RSICD_optimal'
+    # log_dir = '/home/a.sebaq/Generative-Models/DDPM/logs/exp_imagen_text_t5_base_bs64_ts50'
+    log_dir = '/home/a.sebaq/Generative-Models/DDPM/logs/exp_imagen_text_t5_base_bs64'
+
+    logger, writer, df = config(log_dir, data_root)
+    seed_everything()
+
+    imagen, unet_gen = build_models()
+    params = sum(p.numel() for p in unet_gen.parameters())
+    logger.info(f'Number of generation UNet model parameters : {params:,}')
+    params = sum(p.numel() for p in imagen.parameters())
+    logger.info(f'Number of Imagen model parameters : {params:,}')
+
+    train(imagen, df, data_root, logger, writer, log_dir)
 
 
 if __name__ == '__main__':

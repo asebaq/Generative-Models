@@ -22,7 +22,8 @@ from torchmetrics.image.fid import FrechetInceptionDistance
 from shutil import copyfile
 import sys
 
-sys.path.append('..')
+sys.path.append(os.path.realpath('.'))
+# print(sys.path)
 from utils.seed_everything import seed_everything
 from utils import log
 
@@ -503,6 +504,10 @@ class DDPM:
         }, save_path)
 
     def load(self, load_path):
+        if not os.path.isfile(load_path):
+            logger.warn(f'Model not founf at: {load_path}')
+            return 
+
         network = self.ddpm
         checkpoint = torch.load(load_path)
         if isinstance(self.ddpm, nn.DataParallel):
@@ -515,13 +520,14 @@ class DDPM:
 
 
 if __name__ == '__main__':
-    batch_size = 16
+    batch_size = 64
     img_size = 64
-    # root = '/home/asebaq/CholecT50_sample/data/images'
-    # root = '/home/asebaq/SAC/healthy_aug_22_good'
-    root = '/home/asebaq/Downloads/cifar-10-python/cifar-10-batches-py/cifar10-64/data'
-    log_dir = './logs/exp_cifar10_ema_cfg'
+    root = '/home/a.sebaq/Generative-Models/DDPM/cifar-10-python/cifar-10-batches-py/cifar10-64/data'
+    log_dir = '/home/a.sebaq/Generative-Models/DDPM/logs/exp_cifar10_ema_cfg'
+    out_dir = '/home/a.sebaq/Generative-Models/DDPM/output'
     os.makedirs(log_dir, exist_ok=True)
+    os.makedirs(out_dir, exist_ok=True)
+
     copyfile(os.path.realpath(__file__), os.path.join(log_dir, os.path.realpath(__file__).split('/')[-1]))
     logger = log.setup_custom_logger(log_dir, 'root')
     logger.debug('main')
