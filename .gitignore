@@ -139,6 +139,6 @@ dmypy.json
 /*/runs/*
 /*/*/*/runs/*
 /*/data/
-/*/logs
+/*/logs/*
 /*/cifar-10-python
 /*/output
