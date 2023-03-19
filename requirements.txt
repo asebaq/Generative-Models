@@ -25,3 +25,4 @@ imagen-pytorch
 lion-pytorch
 nltk
 scikit-learn
+deepspeed

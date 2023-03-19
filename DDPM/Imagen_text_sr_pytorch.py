@@ -1,6 +1,6 @@
 import os.path
 import time
-import argparser
+import argparse
 from imagen_pytorch import Unet, Imagen, ImagenTrainer
 from PIL import Image
 import pandas as pd
@@ -39,18 +39,18 @@ class SatDataset(Dataset):
 
 
 def config(args):
-    os.makedirs(args['log_dir'], exist_ok=True)
-    logger = log.setup_custom_logger(args['log_dir'], 'root')
+    os.makedirs(args.log_dir, exist_ok=True)
+    logger = log.setup_custom_logger(args.log_dir, 'root')
     logger.debug('main')
-    writer = SummaryWriter(os.path.join(args['log_dir'], 'runs'))
-    df = pd.read_csv(os.path.join(args['data_root'], 'dataset_rsicd.csv'))
-    os.makedirs(os.path.join(args['log_dir'], 'generated_images'), exist_ok=True)
+    writer = SummaryWriter(os.path.join(args.log_dir, 'runs'))
+    df = pd.read_csv(os.path.join(args.data_root, 'dataset_rsicd.csv'))
+    os.makedirs(os.path.join(args.log_dir, 'generated_images'), exist_ok=True)
     
     py_file = os.path.realpath(__file__)
-    copyfile(, os.path.join(args['log_dir'], os.path.basename(py_file)))
+    copyfile(py_file, os.path.join(args.log_dir, os.path.basename(py_file)))
 
     bash_file = os.path.realpath(os.path.join(os.path.dirname(__file__), '..', 'lunch_training_sr.sh'))
-    copyfile(bash_file, os.path.join(args['log_dir'], os.path.basename(bash_file)))
+    copyfile(bash_file, os.path.join(args.log_dir, os.path.basename(bash_file)))
     return logger, writer, df
 
 
@@ -78,8 +78,8 @@ def build_models(args):
     imagen = Imagen(
         text_encoder_name='t5-base',
         unets=(unet_gen, unet_sr),
-        image_sizes=(args['img_sz'], args['sr_sz']),
-        timesteps=args['ts'],
+        image_sizes=(args.img_sz, args.sr_sz),
+        timesteps=args.ts,
         cond_drop_prob=0.1
     ).cuda()
 
@@ -94,14 +94,14 @@ def build_dataloaders(df, args, image_size=64):
         T.ToTensor()
     ])
 
-    train_dataset = SatDataset(df, os.path.join(args['data_root'], 'RSICD_images'), image_size=image_size, transform=transform)
-    train_dataloader = DataLoader(train_dataset, batch_size=args['batch_sz'], shuffle=True, num_workers=2, pin_memory=True)
+    train_dataset = SatDataset(df, os.path.join(args.data_root, 'RSICD_images'), image_size=image_size, transform=transform)
+    train_dataloader = DataLoader(train_dataset, batch_size=args.batch_sz, shuffle=True, num_workers=2, pin_memory=True)
 
     transform = T.Compose([
         T.Resize((image_size, image_size)),
         T.ToTensor()
     ])
-    test_dataset = SatDataset(df, os.path.join(args['data_root'], 'RSICD_images'), image_size=image_size, transform=transform,
+    test_dataset = SatDataset(df, os.path.join(args.data_root, 'RSICD_images'), image_size=image_size, transform=transform,
                               split='test')
     test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=True, num_workers=2, pin_memory=True)
     return train_dataloader, test_dataloader
@@ -111,18 +111,19 @@ def train(imagen, df, logger, writer, args):
     
     # working training loop
     models = ['Gen-UNet', 'SR-UNet']
-    image_sizes = [args['img_sz'], args['sr_sz']]
+    image_sizes = [args.img_sz, args.sr_sz]
     max_batch_sizes = [4, 2]
-    model_path = os.path.join(args['log_dir'], 'checkpoint.pt')
+    model_path = os.path.join(args.log_dir, 'checkpoint.pt')
 
-    for i in (1, 2):
-        train_dataloader, test_dataloader = build_dataloaders(df, args['data_root'], image_sizes[i-1])
+    for i in (2, 1):
+    # for i in (1, 2):
+        train_dataloader, test_dataloader = build_dataloaders(df, args, image_sizes[i-1])
         trainer = ImagenTrainer(imagen=imagen).cuda()
         # Load model
         if os.path.isfile(model_path):
             trainer.load(model_path)
             
-        for j in range(args['start_epoch'], args['epochs']):
+        for j in range(args.start_epoch, args.epochs):
             loss = 0
             start = time.time()
             for _, (imgs, txts) in enumerate(tqdm(train_dataloader)):
@@ -133,7 +134,7 @@ def train(imagen, df, logger, writer, args):
                     max_batch_size=max_batch_sizes[i-1]
                 )
                 trainer.update(unet_number=i)
-            loss = loss / (len(train_dataloader) / args['batch_sz'])
+            loss = loss / (len(train_dataloader) / args.batch_sz)
             writer.add_scalar(f'Imagen {models[i-1]} Model', round(loss, 3), j)
 
             logger.info(
@@ -145,7 +146,7 @@ def train(imagen, df, logger, writer, args):
                 start = time.time()
                 images = trainer.sample(texts=[txt], batch_size=1, stop_at_unet_number=i, return_pil_images=True)
                 logger.info(f'Sampling time: {round(time.time() - start, 3)} sec')
-                image_path = os.path.join(args['log_dir'], 'generated_images',
+                image_path = os.path.join(args.log_dir, 'generated_images',
                                           f"sample-{models[i-1]}-{j}-text-{'_'.join(txt.replace('.', '').split())}.png")
                 images[0].save(image_path)
             trainer.save(model_path)
@@ -168,8 +169,6 @@ def main(args):
 
 if __name__ == '__main__':
 
-    import argparse
-
     parser = argparse.ArgumentParser(description='Train Imagen with super-res')
     parser.add_argument('-i', '--img_sz', type=int,
                         default=128, help='Size of the generated image')
@@ -182,7 +181,7 @@ if __name__ == '__main__':
     parser.add_argument('-e', '--epochs', type=int,
                         default=1000, help='Number of training epochs')
     parser.add_argument('-s', '--start_epoch', type=int,
-                        default=121, help='Number of starting epoch')
+                        default=16, help='Number of starting epoch')
     parser.add_argument('-d', '--data_root', type=str,
                         default='/home/a.sebaq/RSICD_optimal', help='Path to data directory')
     parser.add_argument('-l', '--log_dir', type=str,

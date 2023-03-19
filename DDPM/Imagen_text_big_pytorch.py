@@ -5,15 +5,14 @@ from imagen_pytorch import Unet, Imagen, ImagenTrainer
 from PIL import Image
 import pandas as pd
 from tqdm import tqdm
-import argparse
+
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms as T
 
 from shutil import copyfile
 
 import sys
-
-sys.path.append('..')
+sys.path.append('.')
 
 from utils.seed_everything import seed_everything
 from utils import log
@@ -39,46 +38,42 @@ class SatDataset(Dataset):
         return img, txt
 
 
-def config(args):
-    os.makedirs(args.log_dir, exist_ok=True)
-    logger = log.setup_custom_logger(args.log_dir, 'root')
+def config(log_dir, data_root):
+    os.makedirs(log_dir, exist_ok=True)
+    logger = log.setup_custom_logger(log_dir, 'root')
     logger.debug('main')
-    writer = SummaryWriter(os.path.join(args.log_dir, 'runs'))
-    df = pd.read_csv(os.path.join(args.data_root, 'dataset_rsicd.csv'))
-    os.makedirs(os.path.join(args.log_dir, 'generated_images'), exist_ok=True)
-
-    py_file = os.path.realpath(__file__)
-    copyfile(py_file, os.path.join(args.log_dir, os.path.basename(py_file)))
-
-    bash_file = os.path.realpath(os.path.join(os.path.dirname(__file__), '..', 'lunch_training.sh'))
-    copyfile(bash_file, os.path.join(args.log_dir, os.path.basename(bash_file)))
+    writer = SummaryWriter(os.path.join(log_dir, 'runs'))
+    df = pd.read_csv(os.path.join(data_root, 'dataset_rsicd.csv'))
+    os.makedirs(os.path.join(log_dir, 'generated_images'), exist_ok=True)
+    copyfile(os.path.realpath(__file__), os.path.join(log_dir, os.path.realpath(__file__).split('/')[-1]))
     return logger, writer, df
 
 
-def build_models(args):
+def build_models():
     # unets for unconditional imagen
     unet_gen = Unet(
         dim=128,
-        cond_dim=256,
-        dim_mults=(1, 2, 2, 2),
-        num_resnet_blocks=0,
+        cond_dim=512,
+        dim_mults=(1, 2, 4, 8),
+        num_resnet_blocks=3,
         layer_attns=(False, True, True, True),
         layer_cross_attns=(False, True, True, True)
     )
 
+    
     # imagen, which contains the unet above
     imagen = Imagen(
         text_encoder_name='t5-base',
         unets=unet_gen,
-        image_sizes=args.img_sz,
-        timesteps=args.ts,
+        image_sizes=256,
+        timesteps=1000,
         cond_drop_prob=0.1
     )
 
     return imagen, unet_gen
 
 
-def build_dataloaders(df, args, image_size=64):
+def build_dataloaders(df, data_root, image_size=64):
     transform = T.Compose([
         T.Resize((image_size, image_size)),
         T.RandomHorizontalFlip(),
@@ -86,33 +81,35 @@ def build_dataloaders(df, args, image_size=64):
         T.ToTensor()
     ])
 
-    train_dataset = SatDataset(df, os.path.join(args.data_root, 'RSICD_images'), image_size=image_size,
-                               transform=transform)
+    train_dataset = SatDataset(df, os.path.join(data_root, 'RSICD_images'), image_size=image_size, transform=transform)
     train_dataloader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=2, pin_memory=True)
 
     transform = T.Compose([
         T.Resize((image_size, image_size)),
         T.ToTensor()
     ])
-    test_dataset = SatDataset(df, os.path.join(args.data_root, 'RSICD_images'), image_size=image_size,
-                              transform=transform,
+    test_dataset = SatDataset(df, os.path.join(data_root, 'RSICD_images'), image_size=image_size, transform=transform,
                               split='test')
     test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=True, num_workers=2, pin_memory=True)
     return train_dataloader, test_dataloader
 
 
-def train(imagen, df, logger, writer, args):
+def train(imagen, df, data_root, logger, writer, log_dir):
+    
+
     # working training loop
-    model_path = os.path.join(args.log_dir, 'checkpoint.pt')
+    epochs = 1000
+    model_path = os.path.join(log_dir, 'checkpoint.pt')
 
-    train_dataloader, test_dataloader = build_dataloaders(df, args, 128)
+    train_dataloader, test_dataloader = build_dataloaders(df, data_root, 128)
     trainer = ImagenTrainer(imagen=imagen)
-
+    
+    
     # Load model
     if os.path.isfile(model_path):
         trainer.load(model_path)
-
-    for j in range(args.start_epoch, args.epochs):
+        
+    for j in range(277, epochs):
         loss = 0
         start = time.time()
         for _, (imgs, txts) in enumerate(tqdm(train_dataloader)):
@@ -135,42 +132,28 @@ def train(imagen, df, logger, writer, args):
             start = time.time()
             images = trainer.sample(texts=[txt], batch_size=1, return_pil_images=True)
             logger.info(f'Sampling time: {round(time.time() - start, 3)} sec')
-            image_path = os.path.join(args.log_dir, 'generated_images',
-                                      f"sample-{j}-text-{'_'.join(txt.replace('.', '').split())}.png")
+            image_path = os.path.join(log_dir, 'generated_images',
+                                        f"sample-{j}-text-{'_'.join(txt.replace('.', '').split())}.png")
             images[0].save(image_path)
         trainer.save(model_path)
 
 
-def main(args):
-    logger, writer, df = config(args)
+def main():
+    data_root = '/home/a.sebaq/RSICD_optimal'
+    # log_dir = '/home/a.sebaq/Generative-Models/DDPM/logs/exp_imagen_text_t5_base_bs64_ts50'
+    log_dir = '/home/a.sebaq/Generative-Models/DDPM/logs/exp_imagen_text_t5_base_bs64_big'
+
+    logger, writer, df = config(log_dir, data_root)
     seed_everything()
 
-    imagen, unet_gen = build_models(args)
+    imagen, unet_gen = build_models()
     params = sum(p.numel() for p in unet_gen.parameters())
     logger.info(f'Number of generation UNet model parameters : {params:,}')
     params = sum(p.numel() for p in imagen.parameters())
     logger.info(f'Number of Imagen model parameters : {params:,}')
 
-    # train(imagen, df, logger, writer, args)
+    train(imagen, df, data_root, logger, writer, log_dir)
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Train Imagen with super-res')
-    parser.add_argument('-i', '--img_sz', type=int,
-                        default=128, help='Size of the generated image')
-    parser.add_argument('-t', '--ts', type=int,
-                        default=1000, help='time steps of the diffusion process')
-    parser.add_argument('-b', '--batch_sz', type=int,
-                        default=64, help='Size of batch of images')
-    parser.add_argument('-e', '--epochs', type=int,
-                        default=1000, help='Number of training epochs')
-    parser.add_argument('-s', '--start_epoch', type=int,
-                        default=16, help='Number of starting epoch')
-    parser.add_argument('-d', '--data_root', type=str,
-                        default='/home/asebaq/dev/RSICD_optimal', help='Path to data directory')
-    parser.add_argument('-l', '--log_dir', type=str,
-                        default='/home/asebaq/dev/Generative-Models/DDPM/logs/exp_imagen_text_t5_base_bs64',
-                        help='Path to log directory')
-
-    args = parser.parse_args()
-    main(args)
+    main()
